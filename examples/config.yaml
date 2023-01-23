@@ -1,0 +1,13 @@
+shards:
+# shard1: 0x00 - h
+- start: ""
+  end: i
+  address: 127.0.0.1:12379
+# shard2: i - r
+- start: i
+  end: s
+  address: 127.0.0.1:22379
+# shard3: s - 0xff
+- start: s
+  end: ""
+  address: 127.0.0.1:32379
