@@ -25,11 +25,16 @@ func NewDefaultShardingConfigs(shards []Shard) *DefaultShardingConfigs {
 
 func (d *DefaultShardingConfigs) GetShardClis(key []byte, rangeEnd []byte) []ShardClient {
 	var ret = make([]ShardClient, 0, len(d.shards))
+	var findStart bool
 	for _, shard := range d.shards {
 		if shard.Contains(key, rangeEnd) {
 			ret = append(ret, shard.GetClient())
+			findStart = true
 		} else {
-			break
+			if findStart {
+				// shards are continuous, so we found end
+				break
+			}
 		}
 	}
 	return ret

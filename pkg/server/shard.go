@@ -21,6 +21,8 @@ type ShardImpl struct {
 	cli ShardClient
 }
 
+var noEnd = []byte{0}
+
 func NewShardImpl(shardID int, totalShards int, conf config.Shard) (*ShardImpl, error) {
 	ret := new(ShardImpl)
 	if len(conf.Start) > 0 {
@@ -29,7 +31,7 @@ func NewShardImpl(shardID int, totalShards int, conf config.Shard) (*ShardImpl, 
 		ret.start = conf.StartBytes
 	}
 	if shardID == 0 {
-		ret.start = []byte{'\x00'}
+		ret.start = []byte{}
 	}
 
 	if len(conf.End) > 0 {
@@ -38,7 +40,7 @@ func NewShardImpl(shardID int, totalShards int, conf config.Shard) (*ShardImpl, 
 		ret.end = conf.EndBytes
 	}
 	if shardID == totalShards-1 {
-		ret.end = []byte{'\xff'}
+		ret.end = noEnd
 	}
 
 	var err error
@@ -51,14 +53,19 @@ func NewShardImpl(shardID int, totalShards int, conf config.Shard) (*ShardImpl, 
 
 // Contains returns true if the key is in the range of the shard.
 func (s *ShardImpl) Contains(key []byte, rangeEnd []byte) bool {
-	if bytes.Compare(key, s.end) >= 0 {
-		return false
+	if !bytes.Equal(s.end, noEnd) {
+		if bytes.Compare(key, s.end) >= 0 {
+			return false
+		}
 	}
-	if bytes.Compare(key, s.start) > 0 {
+	if bytes.Compare(key, s.start) >= 0 {
 		return true
 	}
 	if len(rangeEnd) < 1 {
 		return false
+	}
+	if bytes.Equal(rangeEnd, noEnd) {
+		return true
 	}
 	if bytes.Compare(rangeEnd, s.start) > 0 {
 		return true

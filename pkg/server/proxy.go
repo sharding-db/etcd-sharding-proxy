@@ -30,13 +30,11 @@ func (s *ShardingProxy) Range(ctx context.Context, req *pb.RangeRequest) (*pb.Ra
 	var err error
 	if len(rets) > 1 {
 		groupRunner := s.groupRunners.GetGroupRunner()
-		for i, shardCli := range shardClis {
+		for i := range shardClis {
+			index := i
 			groupRunner.Add(func() error {
-				rets[i], err = shardCli.Range(ctx, req)
-				if err != nil {
-					return errors.Wrapf(err, "failed to do range in shard[%d]", shardCli.GetShardID())
-				}
-				return nil
+				rets[index], err = shardClis[index].Range(ctx, req)
+				return errors.Wrapf(err, "failed to do range in shard[%d]", shardClis[index].GetShardID())
 			})
 		}
 		err := groupRunner.Do()
@@ -49,7 +47,7 @@ func (s *ShardingProxy) Range(ctx context.Context, req *pb.RangeRequest) (*pb.Ra
 			return nil, errors.Wrapf(err, "failed to do range in shard[%d]", shardClis[0].GetShardID())
 		}
 	}
-	ret, err := s.respFilter.FilterRange(rets)
+	ret, err := s.respFilter.FilterRange(req, rets)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to filter range response")
 	}
@@ -73,11 +71,12 @@ func (s *ShardingProxy) DeleteRange(ctx context.Context, req *pb.DeleteRangeRequ
 	var err error
 	groupRunner := s.groupRunners.GetGroupRunner()
 	if len(rets) > 1 {
-		for i, shardCli := range shardClis {
+		for i := range shardClis {
+			index := i
 			groupRunner.Add(func() error {
-				rets[i], err = shardCli.DeleteRange(ctx, req)
+				rets[index], err = shardClis[index].DeleteRange(ctx, req)
 				if err != nil {
-					return errors.Wrapf(err, "failed to do delete range in shard[%d]", shardCli.GetShardID())
+					return errors.Wrapf(err, "failed to do delete range in shard[%d]", shardClis[index].GetShardID())
 				}
 				return nil
 			})
@@ -115,21 +114,31 @@ func (s *ShardingProxy) Compact(context.Context, *pb.CompactionRequest) (*pb.Com
 }
 
 type ResponseFilter interface {
-	FilterRange([]*pb.RangeResponse) (*pb.RangeResponse, error)
+	FilterRange(req *pb.RangeRequest, resps []*pb.RangeResponse) (*pb.RangeResponse, error)
 	FilterDeleteRange([]*pb.DeleteRangeResponse) (*pb.DeleteRangeResponse, error)
 }
 
 type DefaultResponseFilter struct {
 }
 
-func (DefaultResponseFilter) FilterRange(resps []*pb.RangeResponse) (*pb.RangeResponse, error) {
-	if len(resps) == 0 {
-		return nil, errors.New("no response")
+func (DefaultResponseFilter) FilterRange(req *pb.RangeRequest, resps []*pb.RangeResponse) (*pb.RangeResponse, error) {
+	// assume len(resps) >= 1
+	if len(resps) < 2 {
+		return resps[0], nil
 	}
 	ret := resps[0]
 	for i := 1; i < len(resps); i++ {
-		ret.Kvs = append(ret.Kvs, resps[i].Kvs...)
-		ret.Count += resps[i].Count
+		if req.Limit > 0 && ret.Count >= req.Limit {
+			ret.More = true
+			break
+		}
+		if resps[i].Count > 0 {
+			if ret.Kvs == nil {
+				ret.Kvs = resps[i].Kvs
+			}
+			ret.Count += resps[i].Count
+			ret.Kvs = append(ret.Kvs, resps[i].Kvs...)
+		}
 		if resps[i].More {
 			ret.More = true
 		}
