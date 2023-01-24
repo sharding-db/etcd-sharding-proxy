@@ -32,7 +32,7 @@ The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requ
 
 # Compatibility
 `Revision`, `MemberId`, `ClusterId` of each shard is used. Hence:
-- Field `revision` in `Range` / `RangeDelete` requests is accross different shards will not work.
+- Field `revision` in `Range` / `RangeDelete` requests across different shards will not work.
 - `Txn` cannot be executed across multiple shards. NOTE: The proxy will not do check for this. If you use `Txn` across multiple shards, the result is undefined.
 - `Compact` is not supported
 
@@ -49,7 +49,12 @@ go run ./cmd/proxy -config ./examples/config.yaml
 ```
 
 Run cmds (need etcdctl installed):
-```
+```shell
+# try the features
 etcdctl put a 1
-etcdctl get a
+etcdctl put b 2
+etcdctl put c 3
+etcdctl get "" --from-key
+etcdctl del "" --from-key
+etcdctl get "" --from-key
 ```
