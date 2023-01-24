@@ -1,4 +1,8 @@
-Initializing runnable first version
+# Project status
+
+This project is in alpha stage. It is not ready for production use.
+
+For now only KV interface is supported. And it's not fully tested.
 
 # General Architecture
 The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requests to the correct `shard` etcd cluster based on the key.
@@ -27,7 +31,10 @@ The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requ
 ```
 
 # Compatibility
-- Revision of the shard is used. So `revision` in `Range` / `RangeDelete` requests is accross different shards will not work.
+`Revision`, `MemberId`, `ClusterId` of each shard is used. Hence:
+- Field `revision` in `Range` / `RangeDelete` requests is accross different shards will not work.
+- `Txn` cannot be executed across multiple shards. NOTE: The proxy will not do check for this. If you use `Txn` across multiple shards, the result is undefined.
+- `Compact` is not supported
 
 # Quick Start with Docker
 Start 3 etcd and the proxy:

@@ -11,6 +11,7 @@ type ShardClient interface {
 
 type ShardingConfigs interface {
 	GetShardClis(key []byte, rangeEnd []byte) []ShardClient
+	GetShardCli(shard int) ShardClient
 }
 
 type DefaultShardingConfigs struct {
@@ -38,4 +39,8 @@ func (d *DefaultShardingConfigs) GetShardClis(key []byte, rangeEnd []byte) []Sha
 		}
 	}
 	return ret
+}
+
+func (d *DefaultShardingConfigs) GetShardCli(shard int) ShardClient {
+	return d.shards[shard].GetClient()
 }

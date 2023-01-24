@@ -102,15 +102,52 @@ func (s *ShardingProxy) DeleteRange(ctx context.Context, req *pb.DeleteRangeRequ
 // A txn request increments the revision of the key-value store
 // and generates events with the same revision for every completed request.
 // It is not allowed to modify the same key several times within one txn.
-func (s *ShardingProxy) Txn(context.Context, *pb.TxnRequest) (*pb.TxnResponse, error) {
-	panic("implement me")
+func (s *ShardingProxy) Txn(ctx context.Context, req *pb.TxnRequest) (*pb.TxnResponse, error) {
+	shardID, err := s.getShardID(req)
+	if err != nil {
+		return nil, err
+	}
+	return s.configs.GetShardCli(shardID).Txn(ctx, req)
 }
+
+func (s *ShardingProxy) getShardID(req *pb.TxnRequest) (int, error) {
+	var getShardIDByOp = func(op *pb.RequestOp) (int, error) {
+		rangeOp := op.GetRequestRange()
+		if rangeOp != nil {
+			clis := s.configs.GetShardClis(rangeOp.Key, nil)
+			return clis[0].GetShardID(), nil
+		}
+		putOp := op.GetRequestPut()
+		if putOp != nil {
+			clis := s.configs.GetShardClis(putOp.Key, nil)
+			return clis[0].GetShardID(), nil
+		}
+		deleteOp := op.GetRequestDeleteRange()
+		if deleteOp != nil {
+			clis := s.configs.GetShardClis(deleteOp.Key, nil)
+			return clis[0].GetShardID(), nil
+		}
+		// assume txn
+		return s.getShardID(op.GetRequestTxn())
+	}
+	for _, op := range req.Success {
+		return getShardIDByOp(op)
+	}
+	for _, op := range req.Failure {
+		return getShardIDByOp(op)
+	}
+	// empty txn, use first shard
+	return 0, nil
+}
+
+var ErrNotSupported = errors.New("not supported")
+var ErrTxnDifferentShard = errors.Wrap(ErrNotSupported, "txn in different shard")
 
 // Compact compacts the event history in the etcd key-value store. The key-value
 // store should be periodically compacted or the event history will continue to grow
 // indefinitely.
-func (s *ShardingProxy) Compact(context.Context, *pb.CompactionRequest) (*pb.CompactionResponse, error) {
-	panic("implement me")
+func (s *ShardingProxy) Compact(ctx context.Context, req *pb.CompactionRequest) (*pb.CompactionResponse, error) {
+	return nil, ErrNotSupported
 }
 
 type ResponseFilter interface {
