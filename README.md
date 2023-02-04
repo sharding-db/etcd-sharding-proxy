@@ -1,17 +1,6 @@
 # Introduction
 `Etcd Sharding Proxy` is a lightweight solution to scale etcd cluster by sharding. It is designed to be compatible with etcd client and easy to deploy.
 
-# Road Map
-- Support KV APIs
-- Support Watch APIs
-- Support Lease APIs
-- Support Auth APIs
-- Support Maintenance APIs
-- Support TLS
-- Performance Test & Tuning for large scale cluster
-
-# General Architecture
-The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requests to the correct `shard` etcd cluster based on the key.
 ```text
                           │
                           │
@@ -35,6 +24,18 @@ The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requ
 │               │ │               │ │               │
 └───────────────┘ └───────────────┘ └───────────────┘
 ```
+
+The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requests to the correct `shard` etcd cluster based on the key.
+
+# Road Map
+- ~~Support KV APIs~~
+- Support Watch APIs
+- Support Lease APIs
+- Support Auth APIs
+- Support Maintenance APIs
+- Support TLS
+- Basic Metrics
+- Performance Test & Tuning for large scale cluster
 
 # Compatibility
 `Revision`, `MemberId`, `ClusterId` of each shard is used. Hence:
