@@ -14,26 +14,10 @@ func NewDefaultGroupRunnerFactory() GroupRunnerFactory {
 }
 
 func (d *GroupRunnerFactoryImpl) GetGroupRunner() GroupRunner {
-	return &GroupRunnerImpl{}
+	return &errgroup.Group{}
 }
 
 type GroupRunner interface {
-	Add(func() error)
-	Do() error
-}
-
-type GroupRunnerImpl struct {
-	funcs []func() error
-}
-
-func (d *GroupRunnerImpl) Add(f func() error) {
-	d.funcs = append(d.funcs, f)
-}
-
-func (d *GroupRunnerImpl) Do() error {
-	eg := new(errgroup.Group)
-	for _, f := range d.funcs {
-		eg.Go(f)
-	}
-	return eg.Wait()
+	Go(func() error)
+	Wait() error
 }
