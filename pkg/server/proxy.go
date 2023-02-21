@@ -8,8 +8,10 @@ import (
 )
 
 var _ pb.KVServer = &ShardingProxy{}
+var _ pb.WatchServer = &ShardingProxy{}
 
 type ShardingProxy struct {
+	watchStreams ProxyWatchStreamFactory
 	groupRunners GroupRunnerFactory
 	configs      ShardingConfigs
 	respFilter   ResponseFilter
@@ -32,12 +34,12 @@ func (s *ShardingProxy) Range(ctx context.Context, req *pb.RangeRequest) (*pb.Ra
 		groupRunner := s.groupRunners.GetGroupRunner()
 		for i := range shardClis {
 			index := i
-			groupRunner.Add(func() error {
+			groupRunner.Go(func() error {
 				rets[index], err = shardClis[index].Range(ctx, req)
 				return errors.Wrapf(err, "failed to do range in shard[%d]", shardClis[index].GetShardID())
 			})
 		}
-		err := groupRunner.Do()
+		err := groupRunner.Wait()
 		if err != nil {
 			return nil, err
 		}
@@ -73,7 +75,7 @@ func (s *ShardingProxy) DeleteRange(ctx context.Context, req *pb.DeleteRangeRequ
 	if len(rets) > 1 {
 		for i := range shardClis {
 			index := i
-			groupRunner.Add(func() error {
+			groupRunner.Go(func() error {
 				rets[index], err = shardClis[index].DeleteRange(ctx, req)
 				if err != nil {
 					return errors.Wrapf(err, "failed to do delete range in shard[%d]", shardClis[index].GetShardID())
@@ -81,7 +83,7 @@ func (s *ShardingProxy) DeleteRange(ctx context.Context, req *pb.DeleteRangeRequ
 				return nil
 			})
 		}
-		err = groupRunner.Do()
+		err = groupRunner.Wait()
 	} else {
 		rets[0], err = shardClis[0].DeleteRange(ctx, req)
 		if err != nil {
@@ -108,6 +110,16 @@ func (s *ShardingProxy) Txn(ctx context.Context, req *pb.TxnRequest) (*pb.TxnRes
 		return nil, err
 	}
 	return s.configs.GetShardCli(shardID).Txn(ctx, req)
+}
+
+// Watch watches for events happening or that have happened. Both input and output
+// are streams; the input stream is for creating and canceling watchers and the output
+// stream sends events. One watch RPC can watch on multiple key ranges, streaming events
+// for several watches at once. The entire event history can be watched starting from the
+// last compaction revision.
+func (s *ShardingProxy) Watch(stream pb.Watch_WatchServer) (err error) {
+	return s.watchStreams.NewProxyWatchStream(stream, s.configs).
+		Run()
 }
 
 func (s *ShardingProxy) getShardID(req *pb.TxnRequest) (int, error) {

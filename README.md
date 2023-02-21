@@ -28,7 +28,7 @@
 The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requests to the correct `shard` etcd cluster based on the key.
 
 # Road Map
-- ~~Support KV APIs~~
+- [✔️] Support KV APIs
 - Support Watch APIs
 - Support Lease APIs
 - Support Auth APIs
@@ -59,9 +59,7 @@ go run ./cmd/proxy -config ./examples/config.yaml
 
 # try the features
 etcdctl put a 1
-etcdctl put b 2
-etcdctl put c 3
-etcdctl get "" --from-key
-etcdctl del "" --from-key
+etcdctl put j 2
+etcdctl put z 3
 etcdctl get "" --from-key
 ```

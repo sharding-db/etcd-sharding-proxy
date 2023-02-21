@@ -6,12 +6,14 @@ import (
 
 type ShardClient interface {
 	pb.KVClient
+	pb.WatchClient
 	GetShardID() int
 }
 
 type ShardingConfigs interface {
 	GetShardClis(key []byte, rangeEnd []byte) []ShardClient
 	GetShardCli(shard int) ShardClient
+	GetAllShardClis() []ShardClient
 }
 
 type DefaultShardingConfigs struct {
@@ -43,4 +45,12 @@ func (d *DefaultShardingConfigs) GetShardClis(key []byte, rangeEnd []byte) []Sha
 
 func (d *DefaultShardingConfigs) GetShardCli(shard int) ShardClient {
 	return d.shards[shard].GetClient()
+}
+
+func (d *DefaultShardingConfigs) GetAllShardClis() []ShardClient {
+	var ret = make([]ShardClient, 0, len(d.shards))
+	for _, shard := range d.shards {
+		ret = append(ret, shard.GetClient())
+	}
+	return ret
 }
