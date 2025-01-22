@@ -14,23 +14,30 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-type ProxyWatchStreamFactory interface {
-	NewProxyWatchStream(gRPCStream pb.Watch_WatchServer, sharding ShardingConfigs) ProxyWatchStream
+var _ pb.WatchServer = &WatchProxy{}
+
+type WatchProxy struct {
+	configs ShardingConfigs
 }
 
-type ProxyWatchStreamFactoryImpl struct {
+func NewWatchProxy(configs ShardingConfigs) *WatchProxy {
+	return &WatchProxy{
+		configs: configs,
+	}
 }
 
-func (ProxyWatchStreamFactoryImpl) NewProxyWatchStream(gRPCStream pb.Watch_WatchServer, sharding ShardingConfigs) ProxyWatchStream {
-	return NewProxyWatchStreamImpl(gRPCStream, sharding)
+// Watch watches for events happening or that have happened. Both input and output
+// are streams; the input stream is for creating and canceling watchers and the output
+// stream sends events. One watch RPC can watch on multiple key ranges, streaming events
+// for several watches at once. The entire event history can be watched starting from the
+// last compaction revision.
+func (s *WatchProxy) Watch(stream pb.Watch_WatchServer) (err error) {
+	return NewSingleWatchStreamProxy(stream, s.configs).
+		Run()
 }
 
-type ProxyWatchStream interface {
-	Run() error
-}
-
-// ProxyWatchStreamImpl implements ProxyWatchStream
-type ProxyWatchStreamImpl struct {
+// SingleWatchStreamProxy implements ProxyWatchStream
+type SingleWatchStreamProxy struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	lg         *zap.Logger
@@ -47,10 +54,10 @@ type ProxyWatchStreamImpl struct {
 	upstreamErrChan chan error
 }
 
-func NewProxyWatchStreamImpl(gRPCStream pb.Watch_WatchServer, sharding ShardingConfigs) *ProxyWatchStreamImpl {
+func NewSingleWatchStreamProxy(gRPCStream pb.Watch_WatchServer, sharding ShardingConfigs) *SingleWatchStreamProxy {
 	upstreamErrChan := make(chan error, 1)
 	ctx, cancel := context.WithCancel(gRPCStream.Context())
-	return &ProxyWatchStreamImpl{
+	return &SingleWatchStreamProxy{
 		ctx:         ctx,
 		cancel:      cancel,
 		lg:          zap.L().Named("ProxyWatchStream"),
@@ -67,14 +74,14 @@ func NewProxyWatchStreamImpl(gRPCStream pb.Watch_WatchServer, sharding ShardingC
 	}
 }
 
-func (p *ProxyWatchStreamImpl) Run() error {
+func (p *SingleWatchStreamProxy) Run() error {
 	p.groupRunner.Go(p.sendLoop)
 	p.groupRunner.Go(p.recvLoop)
 	p.groupRunner.Go(p.handleRecvLoop)
 	return p.groupRunner.Wait()
 }
 
-func (p *ProxyWatchStreamImpl) recvLoop() error {
+func (p *SingleWatchStreamProxy) recvLoop() error {
 	for {
 		req, err := p.gRPCStream.Recv()
 		if err != nil {
@@ -88,7 +95,7 @@ func (p *ProxyWatchStreamImpl) recvLoop() error {
 	}
 }
 
-func (p *ProxyWatchStreamImpl) handleRecvLoop() error {
+func (p *SingleWatchStreamProxy) handleRecvLoop() error {
 	for {
 		var req *pb.WatchRequest
 		var err error
@@ -128,7 +135,7 @@ func (p *ProxyWatchStreamImpl) handleRecvLoop() error {
 	}
 }
 
-func (p *ProxyWatchStreamImpl) sendLoop() error {
+func (p *SingleWatchStreamProxy) sendLoop() error {
 	var msg *pb.WatchResponse
 	for {
 		select {

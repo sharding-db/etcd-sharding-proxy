@@ -34,10 +34,11 @@ func main() {
 	}
 	shardingConfigs := server.NewDefaultShardingConfigs(shards)
 
-	proxy := server.NewShardingProxy(server.NewDefaultGroupRunnerFactory(), shardingConfigs, new(server.DefaultResponseFilter))
+	proxykv := server.NewKVProxy(server.NewDefaultGroupRunnerFactory(), shardingConfigs, new(server.DefaultResponseFilter))
+	proxywatch := server.NewWatchProxy(shardingConfigs)
 	bes := server.BackendServers{
-		KV:    proxy,
-		Watch: proxy,
+		KV:    proxykv,
+		Watch: proxywatch,
 	}
 	server, err := server.NewGrpcServer(bes)
 	if err != nil {

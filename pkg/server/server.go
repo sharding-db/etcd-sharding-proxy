@@ -16,6 +16,7 @@ type GrpcServer struct {
 type BackendServers struct {
 	KV    pb.KVServer
 	Watch pb.WatchServer
+	Lease pb.LeaseServer
 }
 
 func NewGrpcServer(servers BackendServers, opts ...grpc.ServerOption) (*GrpcServer, error) {
@@ -25,6 +26,7 @@ func NewGrpcServer(servers BackendServers, opts ...grpc.ServerOption) (*GrpcServ
 	}
 	pb.RegisterKVServer(server, servers.KV)
 	pb.RegisterWatchServer(server, servers.Watch)
+	pb.RegisterLeaseServer(server, servers.Lease)
 	return ret, nil
 }
 

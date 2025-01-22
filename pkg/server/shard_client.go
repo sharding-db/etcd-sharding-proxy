@@ -10,7 +10,7 @@ import (
 type EtcdGrpcClient interface {
 	// pb.ClusterClient
 	pb.KVClient
-	// pb.LeaseClient
+	pb.LeaseClient
 	pb.WatchClient
 	// pb.AuthClient
 	// pb.MaintenanceClient
@@ -20,6 +20,7 @@ type EtcdGrpcClient interface {
 type EtcdGrpcClientImpl struct {
 	pb.KVClient
 	pb.WatchClient
+	pb.LeaseClient
 }
 
 type ShardClientImpl struct {
@@ -34,11 +35,13 @@ func NewShardClientImpl(shardID int, address string) (*ShardClientImpl, error) {
 	}
 	kvCli := pb.NewKVClient(conn)
 	watchCli := pb.NewWatchClient(conn)
+	LeaseCli := pb.NewLeaseClient(conn)
 	return &ShardClientImpl{
 		shardID: shardID,
 		EtcdGrpcClient: EtcdGrpcClientImpl{
 			KVClient:    kvCli,
 			WatchClient: watchCli,
+			LeaseClient: LeaseCli,
 		},
 	}, nil
 }
