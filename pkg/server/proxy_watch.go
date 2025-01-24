@@ -49,13 +49,11 @@ type SingleWatchStreamProxy struct {
 	groupRunner    GroupRunner
 	mapShardStream map[int]pb.Watch_WatchClient
 
-	recvChan        chan *pb.WatchRequest
-	respChan        chan *pb.WatchResponse
-	upstreamErrChan chan error
+	recvChan chan *pb.WatchRequest
+	respChan chan *pb.WatchResponse
 }
 
 func NewSingleWatchStreamProxy(gRPCStream pb.Watch_WatchServer, sharding ShardingConfigs) *SingleWatchStreamProxy {
-	upstreamErrChan := make(chan error, 1)
 	ctx, cancel := context.WithCancel(gRPCStream.Context())
 	return &SingleWatchStreamProxy{
 		ctx:         ctx,
@@ -66,11 +64,9 @@ func NewSingleWatchStreamProxy(gRPCStream pb.Watch_WatchServer, sharding Shardin
 		groupRunner: new(errgroup.Group),
 
 		mapShardStream: make(map[int]pb.Watch_WatchClient),
-		// shardClientFactory: NewProxyWatchClientFactory(ctx, upstreamErrChan),
 
-		recvChan:        make(chan *pb.WatchRequest, 10),
-		respChan:        make(chan *pb.WatchResponse, 10),
-		upstreamErrChan: upstreamErrChan,
+		recvChan: make(chan *pb.WatchRequest, 10),
+		respChan: make(chan *pb.WatchResponse, 10),
 	}
 }
 
@@ -102,8 +98,6 @@ func (p *SingleWatchStreamProxy) handleRecvLoop() error {
 		select {
 		case <-p.ctx.Done():
 			return p.ctx.Err()
-		case err = <-p.upstreamErrChan:
-			return errors.Wrap(err, "upstream error")
 		case req = <-p.recvChan:
 		}
 
@@ -112,7 +106,6 @@ func (p *SingleWatchStreamProxy) handleRecvLoop() error {
 			if !exist {
 				shardStream, err = shardCli.Watch(p.ctx, p.callOpts...)
 				if err != nil {
-					// log
 					p.lg.Warn("failed to create watch stream on shard", zap.Error(err))
 					return errors.Wrapf(err, "watch on shard[%d]", shardCli.GetShardID())
 				}

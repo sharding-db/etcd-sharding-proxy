@@ -30,7 +30,7 @@ The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requ
 # Road Map
 - [✅] Support KV APIs
 - [✅] Support Watch APIs
-- Support Lease APIs
+- [testing] Support Lease APIs
 - Support Auth APIs
 - Support Maintenance APIs
 - Support TLS
@@ -43,6 +43,11 @@ The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requ
 - `Txn` cannot be executed across multiple shards. NOTE: The proxy will not do check for this. If you use `Txn` across multiple shards, the result is undefined.
 - `Compact` is not supported
 - All `Cluster` APIs are not supported
+
+# About Lease
+1. A lease is created in all shards, so that any key can be tied to a lease in all shards. If ID not given, proxy should generate the ID.
+
+2. As in `1.` the lease ID should be the same across all shards. So when list lease, the proxy only list the lease in the first shard.
 
 # Quick Start with Docker
 ```bash

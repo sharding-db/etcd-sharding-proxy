@@ -7,6 +7,7 @@ import (
 type ShardClient interface {
 	pb.KVClient
 	pb.WatchClient
+	pb.LeaseClient
 	GetShardID() int
 }
 
