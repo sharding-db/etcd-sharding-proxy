@@ -2,7 +2,9 @@ package server
 
 import (
 	"fmt"
+	"google.golang.org/grpc/keepalive"
 	"net"
+	"time"
 
 	"github.com/pkg/errors"
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
@@ -14,12 +16,14 @@ type GrpcServer struct {
 }
 
 type BackendServers struct {
-	KV    pb.KVServer
-	Watch pb.WatchServer
-	Lease pb.LeaseServer
+	KV          pb.KVServer
+	Watch       pb.WatchServer
+	Lease       pb.LeaseServer
+	Maintenance pb.MaintenanceServer
 }
 
 func NewGrpcServer(servers BackendServers, opts ...grpc.ServerOption) (*GrpcServer, error) {
+	opts = append([]grpc.ServerOption{grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 5 * time.Second, PermitWithoutStream: true})}, opts...)
 	server := grpc.NewServer(opts...)
 	ret := &GrpcServer{
 		server: server,
@@ -27,6 +31,9 @@ func NewGrpcServer(servers BackendServers, opts ...grpc.ServerOption) (*GrpcServ
 	pb.RegisterKVServer(server, servers.KV)
 	pb.RegisterWatchServer(server, servers.Watch)
 	pb.RegisterLeaseServer(server, servers.Lease)
+	if servers.Maintenance != nil {
+		pb.RegisterMaintenanceServer(server, servers.Maintenance)
+	}
 	return ret, nil
 }
 
