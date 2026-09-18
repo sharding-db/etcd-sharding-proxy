@@ -58,3 +58,16 @@ The cluster name is unique by default. `--cluster-name` accepts an explicit name
 The full-cluster test uses one control-plane node and plaintext etcd connections on a dedicated Docker network. The separate storage suite exercises mTLS. The isolated network uses kind's experimental custom-network setting and is tested with the pinned kind version.
 
 kind skips kubeadm preflight checks by design. The harness verifies backend readiness through gRPC, but does not test kubeadm's HTTP `/version` preflight against the gRPC-only proxy. The suites are integration acceptance tests, not multi-control-plane HA, online data migration or the complete Kubernetes conformance suite.
+
+## Coordinated key-range PoC
+
+Every storage job also runs `scripts/k8s-smoke.py --mode coordinated` with three
+etcd clusters, mTLS, one proxy endpoint and no resource overrides. It verifies
+ConfigMaps from one collection on both data shards, historical pagination,
+LIST-to-WATCH, leases, compaction and recovery after proxy/data/coordinator restart.
+The kind matrix runs both `backend` and `coordinated` modes on each pinned
+Kubernetes version. Coordinated mode checks same-namespace Pods on both shards.
+Artifacts include the mode in kind result names; storage artifacts include logs
+and results for both harnesses. Manual `storage` and `kind` selections run both modes.
+
+See [PoC scope and limitations](coordinated-sharding.md).

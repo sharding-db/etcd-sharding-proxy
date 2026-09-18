@@ -1,0 +1,9 @@
+# Experimental single endpoint, global metadata revision, two payload shards.
+# Three dedicated etcd clusters are required; see docs/coordinated-sharding.md.
+coordinator:
+  endpoint: 127.0.0.1:12379
+shards:
+  - address: 127.0.0.1:22379
+    end: /registry/pods/integration/m
+  - address: 127.0.0.1:32379
+    start: /registry/pods/integration/m

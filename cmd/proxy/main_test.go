@@ -128,3 +128,67 @@ func (b *largeRangeBackend) Watch(stream pb.Watch_WatchServer) error {
 	}
 	return stream.Send(&pb.WatchResponse{Events: events})
 }
+
+// Constructor handshake and empty range prove coordinated mode is actually
+// wired to the metadata backend, with all public services registered.
+type coordinatedWiringBackend struct {
+	pb.UnimplementedKVServer
+}
+
+func (*coordinatedWiringBackend) Txn(context.Context, *pb.TxnRequest) (*pb.TxnResponse, error) {
+	return &pb.TxnResponse{Succeeded: true}, nil
+}
+func (*coordinatedWiringBackend) Range(context.Context, *pb.RangeRequest) (*pb.RangeResponse, error) {
+	return &pb.RangeResponse{Header: &pb.ResponseHeader{Revision: 42}}, nil
+}
+
+func TestBuildCoordinatedBackends(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := grpc.NewServer()
+	pb.RegisterKVServer(upstream, &coordinatedWiringBackend{})
+	go upstream.Serve(listener)
+	defer upstream.Stop()
+	conf := config.Configurations{Coordinator: &config.Backend{Endpoint: listener.Addr().String()}, Shards: []config.Shard{
+		{Address: "127.0.0.1:1", Start: "ignored", End: "m"},
+		{Address: "127.0.0.1:2", Start: "m", End: "ignored"},
+	}}
+	bes, closeBackend, err := buildBackends(&conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeBackend()
+	if bes.KV == nil || bes.Watch == nil || bes.Lease == nil || bes.Maintenance == nil {
+		t.Fatal("missing services")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	r, err := bes.KV.Range(ctx, &pb.RangeRequest{Key: []byte("key")})
+	if err != nil || r.Header.Revision != 42 {
+		t.Fatalf("response=%v err=%v", r, err)
+	}
+	closeBackend()
+	if _, err := bes.KV.Range(ctx, &pb.RangeRequest{Key: []byte("key")}); err == nil {
+		t.Fatal("metadata connection not closed")
+	}
+	for _, target := range []string{"coordinator", "shard", "identity"} {
+		t.Run(target, func(t *testing.T) {
+			c := config.Configurations{Coordinator: &config.Backend{Endpoint: listener.Addr().String()}, Shards: []config.Shard{{Address: "127.0.0.1:1"}}}
+			switch target {
+			case "coordinator":
+				c.Coordinator.TLS = config.TLS{CAFile: "missing-ca"}
+			case "shard":
+				c.Shards[0].TLS = config.TLS{CAFile: "missing-ca"}
+			case "identity":
+				c.Shards[0].Address = c.Coordinator.Endpoint
+			}
+			_, closeFailed, err := buildBackends(&c)
+			defer closeFailed()
+			if err == nil {
+				t.Fatal("invalid coordinated configuration accepted")
+			}
+		})
+	}
+}

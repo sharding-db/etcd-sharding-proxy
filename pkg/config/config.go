@@ -12,9 +12,10 @@ import (
 type Configurations struct {
 	// ShardingRules is the sharding rules of the cluster.
 	// start key of first shard & end key of last shard are ignored.
-	Shards  []Shard  `json:"shards"`
-	Backend *Backend `json:"backend"`
-	TLS     TLS      `json:"tls"`
+	Shards      []Shard  `json:"shards"`
+	Backend     *Backend `json:"backend"`
+	Coordinator *Backend `json:"coordinator"`
+	TLS         TLS      `json:"tls"`
 }
 
 // NewConfigurationsFromFile  creates a new Configurations from a file.
@@ -50,6 +51,7 @@ type Shard struct {
 	EndBytes []byte `json:"endBytes"`
 	// Address is the address of the shard. Address format is "host:port".
 	Address string `json:"address"`
+	TLS     TLS    `json:"tls"`
 }
 
 // Backend selects a single etcd revision domain, preserving Kubernetes storage semantics.
@@ -100,10 +102,18 @@ func (c *Configurations) Validate() error {
 		if c.Backend.Endpoint == "" {
 			return fmt.Errorf("backend endpoint is required")
 		}
-		if len(c.Shards) != 0 {
-			return fmt.Errorf("backend and shards are mutually exclusive")
+		if len(c.Shards) != 0 || c.Coordinator != nil {
+			return fmt.Errorf("backend and coordinated/shards modes are mutually exclusive")
 		}
 		return c.Backend.TLS.Validate(false)
+	}
+	if c.Coordinator != nil {
+		if c.Coordinator.Endpoint == "" {
+			return fmt.Errorf("coordinator endpoint is required")
+		}
+		if err := c.Coordinator.TLS.Validate(false); err != nil {
+			return err
+		}
 	}
 	if len(c.Shards) == 0 {
 		return fmt.Errorf("configure backend or at least one shard")
@@ -112,6 +122,12 @@ func (c *Configurations) Validate() error {
 	for i, s := range c.Shards {
 		if s.Address == "" {
 			return fmt.Errorf("shard %d address is required", i)
+		}
+		if err := s.TLS.Validate(false); err != nil {
+			return fmt.Errorf("shard %d: %w", i, err)
+		}
+		if c.Coordinator == nil && s.TLS.IsEnabled() {
+			return fmt.Errorf("shard TLS requires coordinated mode")
 		}
 		start, end := s.StartBytes, s.EndBytes
 		if s.Start != "" {

@@ -13,6 +13,13 @@ func TestValidation(t *testing.T) {
 		valid bool
 	}{
 		{"empty", Configurations{}, false},
+		{"coordinated", Configurations{Coordinator: &Backend{Endpoint: "c"}, Shards: []Shard{{Address: "a", End: "m"}, {Address: "b", Start: "m", TLS: TLS{Enabled: true}}}}, true},
+		{"coordinator missing endpoint", Configurations{Coordinator: &Backend{}, Shards: []Shard{{Address: "a"}}}, false},
+		{"coordinator without shards", Configurations{Coordinator: &Backend{Endpoint: "c"}}, false},
+		{"backend with coordinator", Configurations{Coordinator: &Backend{Endpoint: "c"}, Backend: &Backend{Endpoint: "b"}}, false},
+		{"legacy shard TLS rejected", Configurations{Shards: []Shard{{Address: "a", TLS: TLS{Enabled: true}}}}, false},
+		{"invalid coordinator TLS", Configurations{Coordinator: &Backend{Endpoint: "c", TLS: TLS{CertFile: "cert"}}, Shards: []Shard{{Address: "a"}}}, false},
+		{"invalid data TLS", Configurations{Coordinator: &Backend{Endpoint: "c"}, Shards: []Shard{{Address: "a", TLS: TLS{KeyFile: "key"}}}}, false},
 		{"backend", Configurations{Backend: &Backend{Endpoint: "localhost:2379"}}, true},
 		{"empty backend", Configurations{Backend: &Backend{}}, false},
 		{"mixed", Configurations{Backend: &Backend{Endpoint: "localhost:2379"}, Shards: []Shard{{Address: "a"}}}, false},

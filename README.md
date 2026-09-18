@@ -3,7 +3,21 @@
 [![Test](https://github.com/sharding-db/etcd-sharding-proxy/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/sharding-db/etcd-sharding-proxy/actions/workflows/test.yml)
 [![Kubernetes Integration](https://github.com/sharding-db/etcd-sharding-proxy/actions/workflows/integration.yml/badge.svg?branch=main)](https://github.com/sharding-db/etcd-sharding-proxy/actions/workflows/integration.yml)
 
-A lightweight etcd gRPC proxy with Kubernetes resource-based sharding support. Run one proxy endpoint per logical etcd cluster and use kube-apiserver's resource overrides to place selected resources on separate backends.
+An etcd gRPC proxy exploring transparent key-range sharding for Kubernetes. The experimental coordinated mode splits the same resource collection across data shards behind one endpoint, using a coordinator for global MVCC. Backend mode also supports resource-based placement via kube-apiserver overrides.
+
+## Single endpoint key-range sharding (PoC)
+
+Add `coordinator` alongside `shards` to enable global revisions, consistent
+cross-shard LIST/WATCH, CAS, leases and compaction. Data shards store immutable
+values; coordinator etcd atomically publishes their references. This preserves
+the original single-endpoint goal without modifying kube-apiserver.
+
+See [architecture, configuration and limitations](docs/coordinated-sharding.md)
+and [example configuration](examples/coordinated.yaml). **Not production ready:**
+there is no blob garbage collection or coordinated backup/restore. Every key's
+metadata still lives in the coordinator, so this PoC does not establish linear
+write-throughput or key-count scaling. Cross-shard mutations, nested transactions
+and VALUE comparisons/sorting are rejected.
 
 ## Kubernetes resource sharding
 
@@ -48,7 +62,7 @@ See [Kubernetes configuration and verification](docs/kubernetes.md) for proxy co
 | Maintenance | Forwarded, including Compact, Status and Snapshot | Not implemented |
 | TLS/mTLS | Listener and backend configured independently | Listener TLS only; backend connections are plaintext |
 
-`backend` and `shards` are mutually exclusive configurations. Auth and Cluster administration APIs are not implemented in either mode.
+`backend` is mutually exclusive with `shards` and `coordinator`. `shards` alone retains legacy behavior; adding `coordinator` selects the new PoC described above. Auth and Cluster administration APIs are not implemented.
 
 ## Quick start: one backend
 
@@ -96,7 +110,7 @@ For resource sharding, run another proxy against a separate etcd cluster and con
 
 ## Validation
 
-CI runs unit/race tests and a dedicated [Kubernetes Integration workflow](.github/workflows/integration.yml). Its storage suite uses real Kubernetes **1.35.0** and **1.37.0** with two independent etcd backends and mTLS. Its full kind suite uses **1.35.8** and **1.37.0** to check Deployment rollout/scaling, Service DNS/HTTP, ConfigMap/Secret mounts, Job completion, RBAC, finalizers and namespace cleanup.
+CI runs unit/race tests and a dedicated [Kubernetes Integration workflow](.github/workflows/integration.yml). Its storage suite uses real Kubernetes **1.35.0** and **1.37.0** with mTLS and two independent data backends, plus a coordinator in coordinated mode. Both backend and coordinated modes run in the storage suite. Its full kind suite uses **1.35.8** and **1.37.0** in both modes to check Deployment rollout/scaling, Service DNS/HTTP, ConfigMap/Secret mounts, Job completion, RBAC, finalizers and namespace cleanup.
 
 [Run the workflow and inspect scenario results](docs/integration-tests.md); it supports manual dispatch with `all`, `storage` or `kind`.
 
@@ -146,6 +160,8 @@ A lease is granted on every shard with the same ID. KeepAlive renews all shards 
 
 ## Roadmap
 
+- Coordinated-mode blob GC, backup/restore and batched value reads.
+- Benchmarks for coordinator limits and payload capacity scaling.
 - Metrics and operational observability.
 - Large-scale performance and multi-node failure testing.
 - Auth and Cluster administration APIs.
