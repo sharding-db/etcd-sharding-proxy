@@ -1,106 +1,153 @@
-# Introduction
-`Etcd Sharding Proxy` is a lightweight solution to scale etcd cluster by sharding. It is designed to be compatible with etcd client and easy to deploy.
+# Etcd Sharding Proxy
+
+[![Test](https://github.com/sharding-db/etcd-sharding-proxy/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/sharding-db/etcd-sharding-proxy/actions/workflows/test.yml)
+
+A lightweight etcd gRPC proxy with Kubernetes resource-based sharding support. Run one proxy endpoint per logical etcd cluster and use kube-apiserver's resource overrides to place selected resources on separate backends.
+
+## Kubernetes resource sharding
 
 ```text
-                          │
-                          │
-                          │
-                 ┌────────▼────────┐
-                 │  Load Balancer  │
-                 └────────┬────────┘
-                          │
-                          │
-                          │
-             ┌────────────▼────────────┐
-             │   Etcd Sharding Proxy   │
-             └────────────┬────────────┘
-                          │
-                          │
-        ┌─────────────────┼─────────────────┐
-        │                 │                 │
-┌───────▼───────┐ ┌───────▼───────┐ ┌───────▼───────┐
-│               │ │               │ │               │
-│  Etcd Cluster │ │  Etcd Cluster │ │  Etcd Cluster │
-│               │ │               │ │               │
-└───────────────┘ └───────────────┘ └───────────────┘
+                          kube-apiserver
+                                |
+              +-----------------+-----------------+
+              |                                   |
+       default resources                       Events
+              |                                   |
+     proxy-default:2379                   proxy-events:2379
+       backend mode                         backend mode
+              |                                   |
+     etcd default cluster                  etcd Events cluster
 ```
 
-The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requests to the correct `shard` etcd cluster based on the key.
+Each endpoint preserves its backend's revisions, transactions, watches, leases and compaction. There is no shared global revision or distributed transaction across independent clusters.
 
-# Kubernetes
+Configure kube-apiserver with separate endpoints:
 
-For Kubernetes, use the `backend` mode with one endpoint per logical etcd cluster and kube-apiserver resource overrides for sharding. This preserves revisions, transactions, Watch, Lease, Compact and Status semantics and supports TLS/mTLS on both connections. See [Kubernetes setup and verification](docs/kubernetes.md).
+```text
+--etcd-servers=https://proxy-default.internal:2379
+--etcd-servers-overrides=/events#https://proxy-events.internal:2379
+--etcd-cafile=/certs/proxy-ca.crt
+--etcd-certfile=/certs/apiserver-etcd-client.crt
+--etcd-keyfile=/certs/apiserver-etcd-client.key
+```
 
-The original `shards` key-range mode below is experimental and not Kubernetes compatible. It does not provide global revisions or atomic cross-shard transactions.
+Overrides apply to built-in resources. CRDs and custom resources remain on the default backend. Changing overrides on an existing cluster does not migrate stored data.
 
-# Road Map
-- [✅] Support KV APIs
-- [✅] Support Watch APIs
-- [testing] Support Lease APIs
-- Support Auth APIs
-- [backend mode] Support Maintenance APIs
-- [backend mode] Support TLS/mTLS
-- Basic Metrics
-- Performance Test & Tuning for large scale cluster
+See [Kubernetes configuration and verification](docs/kubernetes.md) for proxy configuration, TLS/mTLS, deployment boundaries and repeatable acceptance tests.
 
-# Legacy key-range mode compatibility
-`Revision`, `MemberId`, `ClusterId` of each shard is used. Hence:
-- Field `revision` in `Range` / `RangeDelete` requests across different shards will not work.
-- `Txn` cannot be executed across multiple shards. NOTE: The proxy will not do check for this. If you use `Txn` across multiple shards, the result is undefined.
-- `Compact` is not supported
-- All `Cluster` APIs are not supported
+## Modes and capabilities
 
-# About Lease
-1. A lease is created in all shards, so that any key can be tied to a lease in all shards. If ID not given, proxy should generate the ID.
+| | `backend` mode | Legacy `shards` mode |
+| --- | --- | --- |
+| Routing | One logical etcd cluster per endpoint | Key ranges across independent etcd clusters |
+| Kubernetes | Resource sharding via separate endpoints | Not compatible |
+| KV and transactions | Forwarded with native backend semantics | Experimental; cross-shard transactions are unsafe |
+| Watch | Native IDs, revisions, replay, progress and cancellation | Experimental; no global revision or event ordering |
+| Lease | Native backend lease lifecycle | Same lease ID replicated across shards; non-atomic |
+| Maintenance | Forwarded, including Compact, Status and Snapshot | Not implemented |
+| TLS/mTLS | Listener and backend configured independently | Listener TLS only; backend connections are plaintext |
 
-2. As in `1.` the lease ID should be the same across all shards. So when list lease, the proxy only list the lease in the first shard.
+`backend` and `shards` are mutually exclusive configurations. Auth and Cluster administration APIs are not implemented in either mode.
 
-3. Each keepalive request renews the lease on all shards and returns one response. The response TTL is the minimum reported by any shard; a zero TTL means the lease is missing on at least one shard. Backend stream errors terminate the client stream.
+## Quick start: one backend
 
-4. Time-to-live queries return the minimum shard TTL and, when requested, keys from every shard.
+Prerequisites: Go, `etcd` and `etcdctl`. CI uses the current stable Go toolchain. The commands below use plaintext loopback connections for local testing; use [TLS/mTLS](docs/kubernetes.md#configure-two-proxy-endpoints) for networked deployments.
 
-Lease operations across shards are not atomic. A grant or revoke failure may leave partial state; this proxy does not currently reconcile it. Listing the first shard assumes the lease exists consistently across shards.
+```bash
+git clone https://github.com/sharding-db/etcd-sharding-proxy.git
+cd etcd-sharding-proxy
+```
 
-# Tests
+Start a local etcd in one terminal:
+
+```bash
+etcd --name default \
+  --data-dir ./etcd-0.etcd \
+  --listen-client-urls http://127.0.0.1:12379 \
+  --advertise-client-urls http://127.0.0.1:12379 \
+  --listen-peer-urls http://127.0.0.1:12380 \
+  --initial-advertise-peer-urls http://127.0.0.1:12380 \
+  --initial-cluster default=http://127.0.0.1:12380
+```
+
+Start the proxy in a second terminal using [examples/kubernetes.yaml](examples/kubernetes.yaml):
+
+```bash
+go run ./cmd/proxy -config ./examples/kubernetes.yaml -addr 127.0.0.1 -port 2379
+```
+
+The configuration selects the local backend:
+
+```yaml
+backend:
+  endpoint: 127.0.0.1:12379
+```
+
+Use an ordinary etcd client against the proxy:
+
+```bash
+etcdctl --endpoints=http://127.0.0.1:2379 put hello world
+etcdctl --endpoints=http://127.0.0.1:2379 get hello
+etcdctl --endpoints=http://127.0.0.1:2379 endpoint status --write-out=table
+```
+
+For resource sharding, run another proxy against a separate etcd cluster and configure the corresponding kube-apiserver override. Multiple replicas of the same proxy endpoint must connect to the same logical etcd cluster.
+
+## Validation
+
+CI runs unit/race tests and real Kubernetes **1.35.0** and **1.37.0** acceptance tests with two independent etcd backends and mTLS on both proxy connections.
+
+The Kubernetes harness verifies:
+
+- CRUD and stale resourceVersion/CAS conflicts.
+- Stable pagination snapshots during concurrent writes.
+- LIST-to-WATCH replay and WatchList initial events/bookmarks.
+- CRD and custom-resource CRUD on the default backend.
+- Physical separation of ConfigMaps and Events across backends.
+- Event TTL expiration and its Watch DELETE event.
+- Independent compactor markers and proxy/backend restart recovery.
+
+Separate real-etcd integration tests verify Watch progress, PrevKV, cancellation, lease lifecycle, Status and historical Range/Watch errors after compaction. Regression tests also cover 5 MiB Range and Watch responses.
+
+Run unit tests and static checks:
+
 ```bash
 go test -race ./...
+go vet ./...
 ```
-Lease tests cover key aggregation, listing, keepalive responses, backend failures, cancellation, and client half-close using in-memory gRPC transport. They do not replace validation against real multi-shard etcd clusters or Kubernetes.
 
-# Quick Start with Docker
+With verified [envtest binaries](https://github.com/kubernetes-sigs/controller-tools/releases) installed:
+
 ```bash
-# Clone the repo
-git clone https://github.com/sharding-db/etcd-sharding-proxy.git
-
-# start backend etcd
-docker run --name etcd-0 -d --rm -p 12379:2379 gcr.io/etcd-development/etcd:v3.5.7 etcd --listen-client-urls http://0.0.0.0:2379 -advertise-client-urls=http://0.0.0.0:2379
-docker run --name etcd-1 -d --rm -p 22379:2379 gcr.io/etcd-development/etcd:v3.5.7 etcd --listen-client-urls http://0.0.0.0:2379 -advertise-client-urls=http://0.0.0.0:2379
-docker run --name etcd-2 -d --rm -p 32379:2379 gcr.io/etcd-development/etcd:v3.5.7 etcd --listen-client-urls http://0.0.0.0:2379 -advertise-client-urls=http://0.0.0.0:2379
-
-# start proxy
-go run ./cmd/proxy -config ./examples/config.yaml &
-
-# try the features
-etcdctl put a 1
-etcdctl put j 2
-etcdctl put z 3
-etcdctl get "" --from-key
+export KUBEBUILDER_ASSETS=/absolute/path/controller-tools/envtest
+go test -tags=integration -race ./...
+python3 scripts/k8s-smoke.py --assets "$KUBEBUILDER_ASSETS"
 ```
 
-# Start with local etcd
-```bash
-mkdir /etcd-log
-# start backend etcd
-etcd --name etcd-0 --listen-client-urls http://0.0.0.0:12379 --listen-peer-urls http://0.0.0.0:12380 -advertise-client-urls=http://0.0.0.0:12379 1> ./etcd-log/etcd-0.log 2>&1 &
-etcd --name etcd-1 --listen-client-urls http://0.0.0.0:22379 --listen-peer-urls http://0.0.0.0:22380 -advertise-client-urls=http://0.0.0.0:22379 1> ./etcd-log/etcd-1.log 2>&1 &
-etcd --name etcd-2 --listen-client-urls http://0.0.0.0:32379 --listen-peer-urls http://0.0.0.0:32380 -advertise-client-urls=http://0.0.0.0:32379 1> ./etcd-log/etcd-2.log 2>&1 &
+The harness needs Python 3 and OpenSSL. It creates isolated loopback processes, does not use an existing cluster or kubeconfig, and retains logs and results in its printed artifact directory. These checks cover the Kubernetes storage/control-plane path; they are not a complete conformance or multi-node HA/soak suite.
 
-# start proxy
-go run ./cmd/proxy -config ./examples/config.yaml &
+## Compatibility boundaries
 
-# try the features
-etcdctl put a 1
-etcdctl put j 2
-etcdctl put z 3
-etcdctl get "" --from-key
-```
+- Backend mode forwards the KV, Watch, Lease and Maintenance RPCs exposed by the bundled etcd protobuf API, preserving request fields, revisions, metadata, response headers/trailers and gRPC errors.
+- Client requests retain gRPC's default 4 MiB proxy limit. Backend responses support larger messages. Custom etcd deployments accepting larger requests need a corresponding proxy limit change.
+- Frontend mTLS authenticates the connection to the proxy. The backend sees the proxy's configured certificate identity, not the original client's certificate identity.
+- Endpoint discovery/load balancing, etcd quorum management, backup policy and online migration remain deployment responsibilities.
+
+### Legacy key-range mode
+
+[examples/config.yaml](examples/config.yaml) retains the original three-shard example. This mode is experimental and must not be used as a Kubernetes storage endpoint.
+
+Each shard has independent revisions and cluster/member IDs. Cross-shard historical snapshots and globally ordered watches are not supported. Transactions are not checked for cross-shard operations; their results are undefined when they span shards. Compact is unavailable.
+
+A lease is granted on every shard with the same ID. KeepAlive renews all shards and returns one response with the minimum reported TTL. TTL queries aggregate keys across shards; listing reads the first shard. Grant/revoke failures can leave partial state, and the proxy does not reconcile it.
+
+## Roadmap
+
+- Metrics and operational observability.
+- Large-scale performance and multi-node failure testing.
+- Auth and Cluster administration APIs.
+- Explicit migration and recovery workflows for resource placement changes.
+
+## License
+
+[MIT](LICENSE)
