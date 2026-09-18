@@ -69,6 +69,8 @@ jobs:
       - run: go test -tags=integration -race ./...
       - name: Real Kubernetes resource sharding with mTLS
         run: python3 scripts/k8s-smoke.py --workdir "$RUNNER_TEMP/k8s-smoke"
+      - name: Single endpoint coordinated sharding with mTLS
+        run: python3 scripts/k8s-smoke.py --mode coordinated --workdir "$RUNNER_TEMP/coordinated-smoke"
       - name: Preserve logs and test results
         if: always()
         uses: actions/upload-artifact@v7
@@ -77,15 +79,19 @@ jobs:
           path: |
             ${{ runner.temp }}/k8s-smoke/*.log
             ${{ runner.temp }}/k8s-smoke/result.json
+            ${{ runner.temp }}/coordinated-smoke/*.log
+            ${{ runner.temp }}/coordinated-smoke/result.json
           if-no-files-found: ignore
   kind:
-    name: Common operations (Kubernetes ${{ matrix.kubernetes }})
+    name: Common operations (${{ matrix.mode }}, Kubernetes ${{ matrix.kubernetes }})
     if: github.event_name != 'workflow_dispatch' || inputs.suite == 'all' || inputs.suite == 'kind'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        mode: [backend, coordinated]
+        kubernetes: ['1.35.8', '1.37.0']
         include:
           - kubernetes: '1.35.8'
             node-image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
@@ -127,12 +133,13 @@ jobs:
         run: >-
           python3 scripts/kind-integration.py
           --node-image "$NODE_IMAGE"
+          --mode "${{ matrix.mode }}"
           --workdir "$RUNNER_TEMP/kind-integration"
           --cluster-name proxy-integration
       - name: Preserve diagnostic logs and scenario results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: kind-kubernetes-${{ matrix.kubernetes }}-results
+          name: kind-${{ matrix.mode }}-kubernetes-${{ matrix.kubernetes }}-results
           path: ${{ runner.temp }}/kind-integration/artifacts/
           if-no-files-found: ignore

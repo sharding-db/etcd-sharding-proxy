@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run isolated real kube-apiserver + two etcd backends through mTLS proxies.
+"""Run real kube-apiserver with backend or coordinated mTLS proxy storage.
 
 Requires Go, openssl, and --assets containing kube-apiserver and etcd (envtest).
 No existing cluster/context is used. Logs, certificates and data stay in --workdir
@@ -122,6 +122,15 @@ class Suite:
                 "range_end": base64.b64encode(key[:-1] + bytes([key[-1] + 1])).decode()}
         return self.request(self.backends[shard] + "/v3/kv/range", "POST", body)
 
+    def assert_blob(self, key, shard):
+        records = self.etcd_range(2, "/__etcd_sharding/keys/" + key).get("kvs", [])
+        assert len(records) == 1, (key, records)
+        reference = json.loads(base64.b64decode(records[0]["value"]))
+        assert reference["shard"] == shard, reference
+        blobs = self.etcd_range(shard, reference["key"]).get("kvs", [])
+        assert len(blobs) == 1 and blobs[0].get("value"), reference
+        assert not self.etcd_range(1 - shard, reference["key"]).get("kvs"), reference
+
     def run(self):
         print("Artifacts:", self.work, flush=True)
         self.certs()
@@ -132,7 +141,7 @@ class Suite:
         self.proxy_commands = []
         self.proxy_processes = []
         self.etcd_commands, self.etcd_processes = [], []
-        for index in range(2):
+        for index in range(3 if self.args.mode == "coordinated" else 2):
             client_port, peer_port, proxy_port = port(), port(), port()
             url = "https://127.0.0.1:%d" % client_port
             self.backends.append(url)
@@ -148,11 +157,19 @@ class Suite:
             self.etcd_commands.append(etcd_command)
             self.etcd_processes.append(self.start("etcd-%d" % index, etcd_command))
             self.wait(lambda: self.request(url + "/health"), "etcd ready")
+        for index in range(1 if self.args.mode == "coordinated" else 2):
+            proxy_port = port()
             config = self.work / ("proxy-%d.json" % index)
             tls = {"certFile": str(self.cert), "keyFile": str(self.key), "caFile": str(self.ca)}
-            config.write_text(json.dumps({"backend": {"endpoint": "127.0.0.1:%d" % client_port,
-                                                       "tls": tls},
-                                          "tls": dict(tls, clientCertAuth=True)}))
+            configuration = {"tls": dict(tls, clientCertAuth=True)}
+            if self.args.mode == "coordinated":
+                boundary = "/registry/configmaps/proxy-smoke/cm-c"
+                configuration.update(coordinator={"endpoint": urllib.parse.urlsplit(self.backends[2]).netloc, "tls": tls}, shards=[
+                    {"address": urllib.parse.urlsplit(self.backends[0]).netloc, "end": boundary, "tls": tls},
+                    {"address": urllib.parse.urlsplit(self.backends[1]).netloc, "start": boundary, "tls": tls}])
+            else:
+                configuration["backend"] = {"endpoint": urllib.parse.urlsplit(self.backends[index]).netloc, "tls": tls}
+            config.write_text(json.dumps(configuration))
             command = [binary, "-config", config, "-addr", "127.0.0.1", "-port", str(proxy_port)]
             self.proxy_commands.append(command)
             self.proxy_processes.append(self.start("proxy-%d" % index, command))
@@ -171,13 +188,14 @@ class Suite:
             "--service-account-signing-key-file=" + str(self.key),
             "--service-account-key-file=" + str(self.key),
             "--service-account-issuer=https://proxy-smoke.local",
-            "--etcd-servers=" + proxies[0], "--etcd-servers-overrides=/events#" + proxies[1],
+            "--etcd-servers=" + proxies[0],
+            *(["--etcd-servers-overrides=/events#" + proxies[1]] if self.args.mode == "backend" else []),
             "--etcd-cafile=" + str(self.ca), "--etcd-certfile=" + str(self.cert),
             "--etcd-keyfile=" + str(self.key), "--event-ttl=3s",
             "--etcd-compaction-interval=2s", "--disable-admission-plugins=ServiceAccount",
             "--profiling=false"])
         self.wait(lambda: self.request(self.api + "/readyz") == "ok", "apiserver ready", 90)
-        self.check("real kube-apiserver ready through two mTLS proxies")
+        self.check("real kube-apiserver ready through %s mTLS storage" % self.args.mode)
         self.request(self.api + "/api/v1/namespaces", "POST",
                           {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "proxy-smoke"}}, 201)
         path = self.api + "/api/v1/namespaces/proxy-smoke/configmaps"
@@ -252,16 +270,21 @@ class Suite:
         assert self.request(widgets + "/one")["spec"]["value"] == 2
         self.request(widgets + "/one", "DELETE")
         self.request(widgets + "/one", expected=404)
-        self.check("CRD and custom resource CRUD on default backend")
+        self.check("CRD and custom resource CRUD")
         events = self.api + "/api/v1/namespaces/proxy-smoke/events"
         event_record = self.request(events, "POST", {"apiVersion": "v1", "kind": "Event", "metadata": {"name": "ttl-event"},
             "involvedObject": {"apiVersion": "v1", "kind": "ConfigMap", "name": "cm-a",
                                "namespace": "proxy-smoke", "uid": updated["metadata"]["uid"]}, "reason": "SmokeTest", "message": "TTL expiry", "type": "Normal"}, 201)
-        assert self.etcd_range(0, "/registry/configmaps/proxy-smoke/").get("kvs")
-        assert not self.etcd_range(1, "/registry/configmaps/proxy-smoke/").get("kvs")
-        assert self.etcd_range(1, "/registry/events/proxy-smoke/").get("kvs")
-        assert not self.etcd_range(0, "/registry/events/proxy-smoke/").get("kvs")
-        self.check("physical resource sharding: ConfigMaps default, Events override")
+        if self.args.mode == "coordinated":
+            for name, shard in (("cm-a", 0), ("cm-d", 1)):
+                self.assert_blob("/registry/configmaps/proxy-smoke/" + name, shard)
+            self.check("same ConfigMap collection physically split across data shards via one endpoint")
+        else:
+            assert self.etcd_range(0, "/registry/configmaps/proxy-smoke/").get("kvs")
+            assert not self.etcd_range(1, "/registry/configmaps/proxy-smoke/").get("kvs")
+            assert self.etcd_range(1, "/registry/events/proxy-smoke/").get("kvs")
+            assert not self.etcd_range(0, "/registry/events/proxy-smoke/").get("kvs")
+            self.check("physical resource sharding: ConfigMaps default, Events override")
         event_watch_url = events + "?" + urllib.parse.urlencode({"watch": "true",
             "resourceVersion": event_record["metadata"]["resourceVersion"], "timeoutSeconds": 30})
         deleted = False
@@ -273,10 +296,13 @@ class Suite:
                     break
         assert deleted, "Event TTL did not emit watch DELETE"
         self.request(events + "/ttl-event", expected=404)
-        self.check("Event TTL expiry emits watch DELETE on override backend")
-        # Each independent compactor owns its own compact_rev_key.
-        self.wait(lambda: all(self.etcd_range(i, "compact_rev_key").get("kvs") for i in range(2)), "per-backend compactor markers", 20)
-        self.check("both revision domains have independent compactor markers")
+        self.check("Event TTL expiry emits watch DELETE")
+        if self.args.mode == "coordinated":
+            self.wait(lambda: self.etcd_range(2, "/__etcd_sharding/keys/compact_rev_key").get("kvs"), "global compactor marker", 20)
+            self.check("global coordinator revision domain owns compactor marker")
+        else:
+            self.wait(lambda: all(self.etcd_range(i, "compact_rev_key").get("kvs") for i in range(2)), "per-backend compactor markers", 20)
+            self.check("both revision domains have independent compactor markers")
         self.stop(self.proxy_processes[0])
         self.proxy_processes[0] = self.start("proxy-0-restart", self.proxy_commands[0])
         self.wait(lambda: self.request(path + "/cm-a")["data"]["value"] == "updated", "proxy restart recovery", 30)
@@ -292,7 +318,17 @@ class Suite:
             self.request(path, "POST", cm("after-backend-restart"), (201, 409))
             return self.request(path + "/after-backend-restart")["data"]["value"] == "original"
         self.wait(create_after_restart, "backend write recovery", 30)
-        assert self.etcd_range(0, "/registry/configmaps/proxy-smoke/after-backend-restart").get("kvs")
+        if self.args.mode == "coordinated":
+            self.assert_blob("/registry/configmaps/proxy-smoke/after-backend-restart", 0)
+            self.stop(self.etcd_processes[2])
+            self.etcd_processes[2] = self.start("coordinator-restart", self.etcd_commands[2])
+            self.wait(lambda: self.request(self.backends[2] + "/health"), "coordinator ready", 30)
+            self.wait(lambda: self.request(path, "POST", cm("coordinator-recovered"), (201, 409)), "coordinator write recovery", 30)
+            assert self.request(path + "/coordinator-recovered")["data"]["value"] == "original"
+            self.assert_blob("/registry/configmaps/proxy-smoke/coordinator-recovered", 1)
+            self.check("coordinator restart recovers durable references and global revision")
+        else:
+            assert self.etcd_range(0, "/registry/configmaps/proxy-smoke/after-backend-restart").get("kvs")
         self.check("backend restart reconnects and accepts durable writes")
         self.request(path + "/cm-a", "DELETE")
         self.request(path + "/cm-a", expected=404)
@@ -305,6 +341,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--assets", default=os.environ.get("KUBEBUILDER_ASSETS"), required=not os.environ.get("KUBEBUILDER_ASSETS"))
     parser.add_argument("--workdir")
+    parser.add_argument("--mode", choices=("backend", "coordinated"), default="backend")
     args = parser.parse_args()
     suite = Suite(args)
     try:

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run common operations on an isolated real kind cluster through two proxies.
+"""Run common operations on an isolated real kind cluster through backend or coordinated proxy storage.
 Requires Docker, kind, kubectl and Go. Upload only WORKDIR/artifacts; its parent
 contains a private kubeconfig. Only resources created by this run are stopped.
 """
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+import urllib.parse
 
 ROOT = Path(__file__).resolve().parents[1]
 ETCD_IMAGE = 'gcr.io/etcd-development/etcd:v3.6.6'
@@ -85,6 +87,23 @@ class Suite:
         return self.cmd(['docker', 'exec', self.containers['etcd-' + shard], '/usr/local/bin/etcdctl',
                          '--endpoints=http://127.0.0.1:2379', 'get', prefix, '--prefix', '--keys-only']).stdout.split()
 
+    def etcd_value(self, shard, key):
+        result = self.cmd(['docker', 'exec', self.containers['etcd-' + shard], '/usr/local/bin/etcdctl',
+                           '--endpoints=http://127.0.0.1:2379', 'get', key, '--write-out=json'])
+        values = json.loads(result.stdout).get('kvs', [])
+        assert len(values) == 1, (shard, key, values)
+        return base64.b64decode(values[0]['value'])
+
+    def assert_blob_placement(self, key, shard, shard_index):
+        reference = json.loads(self.etcd_value('coordinator', '/__etcd_sharding/keys/' + key))
+        assert reference['shard'] == shard_index, reference
+        assert reference['key'].startswith('/__etcd_sharding/blobs/'), reference
+        value = self.etcd_value(shard, reference['key'])
+        assert value, (shard, key, 'empty Kubernetes object blob')
+        other = 'right' if shard == 'left' else 'left'
+        assert not self.keys(other, reference['key']), (other, reference)
+        assert not self.keys('coordinator', reference['key']), reference
+
     def setup(self):
         if self.name in self.cmd(['kind', 'get', 'clusters']).stdout.split():
             raise ValueError('refusing to reuse existing kind cluster ' + self.name)
@@ -94,7 +113,10 @@ class Suite:
         arch = {'x86_64': 'amd64', 'amd64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}[platform.machine()]
         self.cmd(['go', 'build', '-o', build / 'proxy', './cmd/proxy'], timeout=180,
                  env=dict(self.env, CGO_ENABLED='0', GOOS='linux', GOARCH=arch))
-        for shard in ('default', 'events'):
+        coordinated = self.args.mode == 'coordinated'
+        shard_names = ('coordinator', 'left', 'right') if coordinated else ('default', 'events')
+        etcd_endpoints = {}
+        for shard in shard_names:
             ip = self.container('etcd-' + shard, ETCD_IMAGE, '/usr/local/bin/etcd', '--name=single',
                 '--data-dir=/tmp/etcd-data', '--listen-client-urls=http://0.0.0.0:2379',
                 '--advertise-client-urls=http://127.0.0.1:2379', '--listen-peer-urls=http://127.0.0.1:2380',
@@ -102,22 +124,41 @@ class Suite:
                 '--watch-progress-notify-interval=1s')
             self.wait(lambda: self.cmd(['docker', 'exec', self.containers['etcd-' + shard],
                        '/usr/local/bin/etcdctl', 'endpoint', 'health'], check=False).returncode == 0)
-            (build / (shard + '.json')).write_text(json.dumps({'backend': {'endpoint': ip + ':2379'}}))
-        (build / 'Dockerfile').write_text('FROM scratch\nCOPY proxy /proxy\nCOPY default.json events.json /\nENTRYPOINT ["/proxy"]\n')
+            etcd_endpoints[shard] = ip + ':2379'
+            if not coordinated:
+                (build / (shard + '.json')).write_text(json.dumps({'backend': {'endpoint': ip + ':2379'}}))
+        if coordinated:
+            boundary = '/registry/pods/integration/m'
+            (build / 'coordinated.json').write_text(json.dumps({
+                'coordinator': {'endpoint': etcd_endpoints['coordinator']},
+                'shards': [{'address': etcd_endpoints['left'], 'end': boundary},
+                           {'address': etcd_endpoints['right'], 'start': boundary}]}))
+        (build / 'Dockerfile').write_text('FROM scratch\nCOPY proxy /proxy\nCOPY *.json /\nENTRYPOINT ["/proxy"]\n')
         image = 'proxy-integration:' + self.token
         self.cmd(['docker', 'build', '-t', image, build], timeout=180)
         endpoints = {}
-        for shard in ('default', 'events'):
+        for shard in (('coordinated',) if coordinated else ('default', 'events')):
+            health_shard = 'coordinator' if coordinated else shard
             ip = self.container('proxy-' + shard, image, '-config', '/' + shard + '.json', '-addr', '0.0.0.0', '-port', '2379')
             endpoints[shard] = 'http://' + ip + ':2379'
-            # kind skips kubeadm preflight; verify actual proxy gRPC health/status.
-            self.wait(lambda: self.cmd(['docker', 'exec', self.containers['etcd-' + shard],
-                '/usr/local/bin/etcdctl', '--endpoints=' + endpoints[shard], 'endpoint', 'health'], check=False).returncode == 0)
-            self.cmd(['docker', 'exec', self.containers['etcd-' + shard], '/usr/local/bin/etcdctl',
-                '--endpoints=' + endpoints[shard], 'endpoint', 'status'])
+            # kind skips kubeadm preflight. Native endpoint health also calls
+            # Alarm, outside the coordinated PoC's API; verify the data path
+            # explicitly instead. All underlying etcds passed health above.
+            client = ['docker', 'exec', self.containers['etcd-' + health_shard],
+                      '/usr/local/bin/etcdctl', '--endpoints=' + endpoints[shard]]
+            probe = ['get', '/__integration_probe__/left'] if coordinated else ['endpoint', 'health']
+            self.wait(lambda: self.cmd(client + probe, check=False).returncode == 0)
+            if coordinated:
+                for key in ('/__integration_probe__/' + self.token, 'z-integration-probe-' + self.token):
+                    self.cmd(client + ['put', key, self.token])
+                    value = self.cmd(client + ['get', key, '--print-value-only']).stdout.strip()
+                    assert value == self.token, (key, value)
+                    assert self.cmd(client + ['del', key]).stdout.strip() == '1', key
+                    assert not self.cmd(client + ['get', key, '--print-value-only']).stdout.strip(), key
+            self.cmd(client + ['endpoint', 'status'])
         config = self.work / 'kind.yaml'
         # No apiVersion: kind converts this mapping for kubeadm v1beta3/v1beta4.
-        config.write_text('''kind: Cluster
+        kind_config = '''kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - role: control-plane
@@ -128,10 +169,13 @@ kubeadmConfigPatches:
     external:
       endpoints:
       - %s
-  apiServer:
+''' % endpoints['coordinated' if coordinated else 'default']
+        if not coordinated:
+            kind_config += '''  apiServer:
     extraArgs:
       etcd-servers-overrides: /events#%s
-''' % (endpoints['default'], endpoints['events']))
+''' % endpoints['events']
+        config.write_text(kind_config)
         self.cluster_started = True
         self.cmd(['kind', 'create', 'cluster', '--name', self.name, '--image', self.args.node_image,
                   '--config', config, '--kubeconfig', self.kubeconfig, '--wait', '180s', '--retain'], timeout=360)
@@ -196,14 +240,56 @@ kubeadmConfigPatches:
         denied = self.k('get', 'secret', 'credentials', '-n', ns, identity, check=False)
         assert denied.returncode != 0 and 'Forbidden' in denied.stderr
         self.passed()
-        self.active = 'physical ConfigMap/default and Event/override storage placement'
-        self.apply(obj('Event', 'placement', involvedObject={'apiVersion': 'v1', 'kind': 'ConfigMap', 'name': 'settings',
-            'namespace': ns, 'uid': self.get('configmap', 'settings')['metadata']['uid']}, reason='Integration', message='placement', type='Normal'))
-        for shard, prefix, present in [('default', '/registry/configmaps/integration/settings', True),
-            ('events', '/registry/configmaps/integration/settings', False), ('events', '/registry/events/integration/placement', True),
-            ('default', '/registry/events/integration/placement', False)]:
-            assert bool(self.keys(shard, prefix)) == present, (shard, prefix, present)
-        self.passed()
+        if self.args.mode == 'coordinated':
+            self.active = 'same namespace Pods across data shards with single endpoint LIST/WATCH'
+            self.apply(obj('Pod', 'alpha', spec={'containers': [{'name': 'alpha', 'image': WORKLOAD_IMAGE,
+                'command': ['sh', '-ec', 'sleep 3600']}]}))
+            self.k('wait', '--for=condition=Ready', 'pod/alpha', '-n', ns, '--timeout=120s', timeout=150)
+            # kubectl's chunk aggregation synthesizes a List with empty RV.
+            # Keep the server's paginated snapshot metadata for watch replay.
+            pod_path = '/api/v1/namespaces/integration/pods'
+            page = json.loads(self.k('get', '--raw', pod_path + '?limit=1').stdout)
+            snapshot_rv = page['metadata']['resourceVersion']
+            assert int(snapshot_rv) > 0, page['metadata']
+            pods = list(page['items'])
+            while page['metadata'].get('continue'):
+                query = urllib.parse.urlencode({'limit': 1, 'continue': page['metadata']['continue']})
+                page = json.loads(self.k('get', '--raw', pod_path + '?' + query).stdout)
+                assert page['metadata']['resourceVersion'] == snapshot_rv
+                pods.extend(page['items'])
+            names = [pod['metadata']['name'] for pod in pods]
+            assert 'alpha' in names and any(name.startswith('web-') for name in names), names
+            ready_web = [pod['metadata']['name'] for pod in pods
+                if pod['metadata']['name'].startswith('web-') and not pod['metadata'].get('deletionTimestamp')
+                and any(c['type'] == 'Ready' and c['status'] == 'True' for c in pod.get('status', {}).get('conditions', []))]
+            assert ready_web, names
+            web_name = ready_web[0]
+            watched_names = {'alpha', web_name}
+            for name in sorted(watched_names):
+                self.k('annotate', 'pod', name, '-n', ns, 'integration.proxy.test/replay=verified')
+            replay = self.k('get', '--raw', '/api/v1/namespaces/integration/pods?watch=true&resourceVersion='
+                + snapshot_rv + '&timeoutSeconds=5', timeout=20).stdout
+            observed = set()
+            for line in replay.splitlines():
+                event = json.loads(line)
+                assert event['type'] != 'ERROR', event
+                metadata = event['object']['metadata']
+                if metadata.get('annotations', {}).get('integration.proxy.test/replay') == 'verified':
+                    observed.add(metadata['name'])
+                    assert int(metadata['resourceVersion']) > int(snapshot_rv)
+            assert watched_names <= observed, (watched_names, observed)
+            self.assert_blob_placement('/registry/pods/integration/alpha', 'left', 0)
+            self.assert_blob_placement('/registry/pods/integration/' + web_name, 'right', 1)
+            self.passed()
+        else:
+            self.active = 'physical ConfigMap/default and Event/override storage placement'
+            self.apply(obj('Event', 'placement', involvedObject={'apiVersion': 'v1', 'kind': 'ConfigMap', 'name': 'settings',
+                'namespace': ns, 'uid': self.get('configmap', 'settings')['metadata']['uid']}, reason='Integration', message='placement', type='Normal'))
+            for shard, prefix, present in [('default', '/registry/configmaps/integration/settings', True),
+                ('events', '/registry/configmaps/integration/settings', False), ('events', '/registry/events/integration/placement', True),
+                ('default', '/registry/events/integration/placement', False)]:
+                assert bool(self.keys(shard, prefix)) == present, (shard, prefix, present)
+            self.passed()
         self.active = 'finalizer blocks deletion until released'
         final = obj('ConfigMap', 'finalized', data={'test': 'finalizer'})
         final['metadata']['finalizers'] = ['integration.proxy.test/hold']
@@ -215,8 +301,13 @@ kubeadmConfigPatches:
         self.passed()
         self.active = 'namespace controller removes workloads and storage'
         self.k('delete', 'namespace', ns, '--wait=true', '--timeout=120s', timeout=150)
-        assert not self.keys('default', '/registry/configmaps/integration/')
-        assert not self.keys('events', '/registry/events/integration/')
+        if self.args.mode == 'coordinated':
+            metadata_keys = self.keys('coordinator', '/__etcd_sharding/keys//registry/')
+            assert not [key for key in metadata_keys if '/integration/' in key or key.endswith('/namespaces/integration')], metadata_keys
+            # Immutable data blobs deliberately remain for MVCC history; visible metadata must be gone.
+        else:
+            assert not self.keys('default', '/registry/configmaps/integration/')
+            assert not self.keys('events', '/registry/events/integration/')
         self.passed()
 
     def rollout(self):
@@ -258,6 +349,7 @@ kubeadmConfigPatches:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--node-image', required=True)
+    parser.add_argument('--mode', choices=('backend', 'coordinated'), default='backend')
     parser.add_argument('--workdir')
     parser.add_argument('--cluster-name')
     parser.add_argument('--keep', action='store_true', help='retain owned test resources for debugging')
@@ -277,7 +369,7 @@ def main():
         except Exception as exc:
             error = (error + '; ' if error else '') + 'cleanup: ' + str(exc)
         (suite.artifacts / 'result.json').write_text(json.dumps({'status': 'failed' if error else 'passed',
-            'node_image': args.node_image, 'cluster': suite.name, 'checks': suite.checks,
+            'node_image': args.node_image, 'mode': args.mode, 'cluster': suite.name, 'checks': suite.checks,
             'failed_scenario': suite.active if error else None, 'error': error,
             'elapsed_seconds': round(time.monotonic() - suite.start, 1)}, indent=2) + '\n')
         print('Public artifacts:', suite.artifacts, flush=True)
