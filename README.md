@@ -1,6 +1,7 @@
 # Etcd Sharding Proxy
 
 [![Test](https://github.com/sharding-db/etcd-sharding-proxy/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/sharding-db/etcd-sharding-proxy/actions/workflows/test.yml)
+[![Kubernetes Integration](https://github.com/sharding-db/etcd-sharding-proxy/actions/workflows/integration.yml/badge.svg?branch=main)](https://github.com/sharding-db/etcd-sharding-proxy/actions/workflows/integration.yml)
 
 A lightweight etcd gRPC proxy with Kubernetes resource-based sharding support. Run one proxy endpoint per logical etcd cluster and use kube-apiserver's resource overrides to place selected resources on separate backends.
 
@@ -95,7 +96,9 @@ For resource sharding, run another proxy against a separate etcd cluster and con
 
 ## Validation
 
-CI runs unit/race tests and real Kubernetes **1.35.0** and **1.37.0** acceptance tests with two independent etcd backends and mTLS on both proxy connections.
+CI runs unit/race tests and a dedicated [Kubernetes Integration workflow](.github/workflows/integration.yml). Its storage suite uses real Kubernetes **1.35.0** and **1.37.0** with two independent etcd backends and mTLS. Its full kind suite uses **1.35.8** and **1.37.0** to check Deployment rollout/scaling, Service DNS/HTTP, ConfigMap/Secret mounts, Job completion, RBAC, finalizers and namespace cleanup.
+
+[Run the workflow and inspect scenario results](docs/integration-tests.md); it supports manual dispatch with `all`, `storage` or `kind`.
 
 The Kubernetes harness verifies:
 
