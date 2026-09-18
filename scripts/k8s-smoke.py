@@ -161,6 +161,9 @@ class Suite:
         self.api = "https://127.0.0.1:%d" % api_port
         self.start("kube-apiserver", [assets / "kube-apiserver",
             "--bind-address=127.0.0.1", "--advertise-address=127.0.0.1",
+            # No service endpoint publication is needed for this loopback-only
+            # storage test; newer Kubernetes rejects loopback endpoint addresses.
+            "--endpoint-reconciler-type=none",
             "--secure-port=" + str(api_port), "--service-cluster-ip-range=10.254.0.0/24",
             "--authorization-mode=RBAC", "--anonymous-auth=false",
             "--client-ca-file=" + str(self.ca), "--tls-cert-file=" + str(self.cert),
