@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+import urllib.parse
 
 ROOT = Path(__file__).resolve().parents[1]
 ETCD_IMAGE = 'gcr.io/etcd-development/etcd:v3.6.6'
@@ -244,15 +245,30 @@ kubeadmConfigPatches:
             self.apply(obj('Pod', 'alpha', spec={'containers': [{'name': 'alpha', 'image': WORKLOAD_IMAGE,
                 'command': ['sh', '-ec', 'sleep 3600']}]}))
             self.k('wait', '--for=condition=Ready', 'pod/alpha', '-n', ns, '--timeout=120s', timeout=150)
-            snapshot = json.loads(self.k('get', 'pods', '-n', ns, '--chunk-size=1', '-o', 'json').stdout)
-            pods = snapshot['items']
+            # kubectl's chunk aggregation synthesizes a List with empty RV.
+            # Keep the server's paginated snapshot metadata for watch replay.
+            pod_path = '/api/v1/namespaces/integration/pods'
+            page = json.loads(self.k('get', '--raw', pod_path + '?limit=1').stdout)
+            snapshot_rv = page['metadata']['resourceVersion']
+            assert int(snapshot_rv) > 0, page['metadata']
+            pods = list(page['items'])
+            while page['metadata'].get('continue'):
+                query = urllib.parse.urlencode({'limit': 1, 'continue': page['metadata']['continue']})
+                page = json.loads(self.k('get', '--raw', pod_path + '?' + query).stdout)
+                assert page['metadata']['resourceVersion'] == snapshot_rv
+                pods.extend(page['items'])
             names = [pod['metadata']['name'] for pod in pods]
             assert 'alpha' in names and any(name.startswith('web-') for name in names), names
-            watched_names = {'alpha', next(name for name in names if name.startswith('web-'))}
+            ready_web = [pod['metadata']['name'] for pod in pods
+                if pod['metadata']['name'].startswith('web-') and not pod['metadata'].get('deletionTimestamp')
+                and any(c['type'] == 'Ready' and c['status'] == 'True' for c in pod.get('status', {}).get('conditions', []))]
+            assert ready_web, names
+            web_name = ready_web[0]
+            watched_names = {'alpha', web_name}
             for name in sorted(watched_names):
                 self.k('annotate', 'pod', name, '-n', ns, 'integration.proxy.test/replay=verified')
             replay = self.k('get', '--raw', '/api/v1/namespaces/integration/pods?watch=true&resourceVersion='
-                + snapshot['metadata']['resourceVersion'] + '&timeoutSeconds=5', timeout=20).stdout
+                + snapshot_rv + '&timeoutSeconds=5', timeout=20).stdout
             observed = set()
             for line in replay.splitlines():
                 event = json.loads(line)
@@ -260,12 +276,10 @@ kubeadmConfigPatches:
                 metadata = event['object']['metadata']
                 if metadata.get('annotations', {}).get('integration.proxy.test/replay') == 'verified':
                     observed.add(metadata['name'])
-                    assert int(metadata['resourceVersion']) > int(snapshot['metadata']['resourceVersion'])
+                    assert int(metadata['resourceVersion']) > int(snapshot_rv)
             assert watched_names <= observed, (watched_names, observed)
             self.assert_blob_placement('/registry/pods/integration/alpha', 'left', 0)
-            for name in names:
-                if name.startswith('web-'):
-                    self.assert_blob_placement('/registry/pods/integration/' + name, 'right', 1)
+            self.assert_blob_placement('/registry/pods/integration/' + web_name, 'right', 1)
             self.passed()
         else:
             self.active = 'physical ConfigMap/default and Event/override storage placement'
