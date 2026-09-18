@@ -140,11 +140,21 @@ class Suite:
             health_shard = 'coordinator' if coordinated else shard
             ip = self.container('proxy-' + shard, image, '-config', '/' + shard + '.json', '-addr', '0.0.0.0', '-port', '2379')
             endpoints[shard] = 'http://' + ip + ':2379'
-            # kind skips kubeadm preflight; verify actual proxy gRPC health/status.
-            self.wait(lambda: self.cmd(['docker', 'exec', self.containers['etcd-' + health_shard],
-                '/usr/local/bin/etcdctl', '--endpoints=' + endpoints[shard], 'endpoint', 'health'], check=False).returncode == 0)
-            self.cmd(['docker', 'exec', self.containers['etcd-' + health_shard], '/usr/local/bin/etcdctl',
-                '--endpoints=' + endpoints[shard], 'endpoint', 'status'])
+            # kind skips kubeadm preflight. Native endpoint health also calls
+            # Alarm, outside the coordinated PoC's API; verify the data path
+            # explicitly instead. All underlying etcds passed health above.
+            client = ['docker', 'exec', self.containers['etcd-' + health_shard],
+                      '/usr/local/bin/etcdctl', '--endpoints=' + endpoints[shard]]
+            probe = ['get', '/__integration_probe__/left'] if coordinated else ['endpoint', 'health']
+            self.wait(lambda: self.cmd(client + probe, check=False).returncode == 0)
+            if coordinated:
+                for key in ('/__integration_probe__/' + self.token, 'z-integration-probe-' + self.token):
+                    self.cmd(client + ['put', key, self.token])
+                    value = self.cmd(client + ['get', key, '--print-value-only']).stdout.strip()
+                    assert value == self.token, (key, value)
+                    assert self.cmd(client + ['del', key]).stdout.strip() == '1', key
+                    assert not self.cmd(client + ['get', key, '--print-value-only']).stdout.strip(), key
+            self.cmd(client + ['endpoint', 'status'])
         config = self.work / 'kind.yaml'
         # No apiVersion: kind converts this mapping for kubeadm v1beta3/v1beta4.
         kind_config = '''kind: Cluster

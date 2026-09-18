@@ -79,7 +79,9 @@ the same TLS/mTLS options as backend mode.
   values sequentially and add network round trips. No throughput improvement is
   claimed by this PoC.
 - Status reports the coordinator's status, not aggregate health/capacity. Other
-  Maintenance APIs, Auth and Cluster administration are unimplemented. There is
+  Maintenance APIs, Auth and Cluster administration are unimplemented. In particular,
+  `etcdctl endpoint health` requires Alarm and is unavailable; test each backend
+  and use explicit proxy Put/Get/Delete probes to check the end-to-end path. There is
   no coordinated snapshot/restore, online migration or failover orchestration.
 - Dedicated clusters, durable etcd storage and stable routing are required.
   A missing blob returns DataLoss; a failed shard read returns an error, not an
