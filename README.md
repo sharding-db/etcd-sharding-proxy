@@ -49,6 +49,18 @@ The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requ
 
 2. As in `1.` the lease ID should be the same across all shards. So when list lease, the proxy only list the lease in the first shard.
 
+3. Each keepalive request renews the lease on all shards and returns one response. The response TTL is the minimum reported by any shard; a zero TTL means the lease is missing on at least one shard. Backend stream errors terminate the client stream.
+
+4. Time-to-live queries return the minimum shard TTL and, when requested, keys from every shard.
+
+Lease operations across shards are not atomic. A grant or revoke failure may leave partial state; this proxy does not currently reconcile it. Listing the first shard assumes the lease exists consistently across shards.
+
+# Tests
+```bash
+go test -race ./...
+```
+Lease tests cover key aggregation, listing, keepalive responses, backend failures, cancellation, and client half-close using in-memory gRPC transport. They do not replace validation against real multi-shard etcd clusters or Kubernetes.
+
 # Quick Start with Docker
 ```bash
 # Clone the repo
