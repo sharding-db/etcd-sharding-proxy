@@ -5,7 +5,8 @@ import (
 	"io"
 
 	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
-	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var _ pb.LeaseServer = &LeaseProxy{}
@@ -56,25 +57,22 @@ func (p *LeaseProxy) LeaseTimeToLive(ctx context.Context, in *pb.LeaseTimeToLive
 			return nil, err
 		}
 		if ret == nil {
-			ret = resp
+			ret = &pb.LeaseTimeToLiveResponse{Header: resp.Header, ID: resp.ID, TTL: resp.TTL, GrantedTTL: resp.GrantedTTL}
 		}
-		ret.Keys = append(resp.Keys, resp.Keys...)
+		if resp.TTL < ret.TTL {
+			ret.TTL = resp.TTL
+		}
+		ret.Keys = append(ret.Keys, resp.Keys...)
 	}
 	return ret, nil
 }
 
-func (p *LeaseProxy) LeaseLeases(ctx context.Context, in *pb.LeaseLeasesRequest) (ret *pb.LeaseLeasesResponse, err error) {
+// LeaseLeases lists the first shard: leases are replicated with the same ID.
+func (p *LeaseProxy) LeaseLeases(ctx context.Context, in *pb.LeaseLeasesRequest) (*pb.LeaseLeasesResponse, error) {
 	for _, shardCli := range p.configs.GetAllShardClis() {
-		resp, err := shardCli.LeaseLeases(ctx, in)
-		if err != nil {
-			return nil, err
-		}
-		if ret == nil {
-			ret = resp
-		}
-		ret.Leases = append(resp.Leases, resp.Leases...)
+		return shardCli.LeaseLeases(ctx, in)
 	}
-	return ret, nil
+	return nil, status.Error(codes.Unavailable, "no lease shards configured")
 }
 
 func (p *LeaseProxy) LeaseKeepAlive(stream pb.Lease_LeaseKeepAliveServer) error {
@@ -84,87 +82,94 @@ func (p *LeaseProxy) LeaseKeepAlive(stream pb.Lease_LeaseKeepAliveServer) error 
 
 type SingleLeaseKeepAliveProxy struct {
 	configs ShardingConfigs
-	ctx     context.Context
 	stream  pb.Lease_LeaseKeepAliveServer
-	cancel  context.CancelFunc
-
-	groupRunner    GroupRunner
-	mapShardStream map[int]pb.Lease_LeaseKeepAliveClient
-	recvChan       chan *pb.LeaseKeepAliveRequest
-	respChan       chan *pb.LeaseKeepAliveResponse
 }
 
 func NewSingleLeaseKeepAliveProxy(configs ShardingConfigs, stream pb.Lease_LeaseKeepAliveServer) *SingleLeaseKeepAliveProxy {
-	ctx, cancel := context.WithCancel(stream.Context())
-	return &SingleLeaseKeepAliveProxy{
-		configs:        configs,
-		ctx:            ctx,
-		stream:         stream,
-		cancel:         cancel,
-		groupRunner:    new(errgroup.Group),
-		mapShardStream: make(map[int]pb.Lease_LeaseKeepAliveClient),
-		recvChan:       make(chan *pb.LeaseKeepAliveRequest, 10),
-		respChan:       make(chan *pb.LeaseKeepAliveResponse, 10),
+	return &SingleLeaseKeepAliveProxy{configs: configs, stream: stream}
+}
+
+func (p *SingleLeaseKeepAliveProxy) Run() error {
+	ctx, cancel := context.WithCancel(p.stream.Context())
+	defer cancel()
+	shards := p.configs.GetAllShardClis()
+	if len(shards) == 0 {
+		return status.Error(codes.Unavailable, "no lease shards configured")
 	}
-}
-
-func (l *SingleLeaseKeepAliveProxy) Run() error {
-	l.groupRunner.Go(l.sendLoop)
-	l.groupRunner.Go(l.recvLoop)
-	l.groupRunner.Go(l.handleRecvLoop)
-	return l.groupRunner.Wait()
-}
-
-func (l *SingleLeaseKeepAliveProxy) sendLoop() error {
-	for {
-		select {
-		case <-l.ctx.Done():
-			return l.ctx.Err()
-		case resp := <-l.respChan:
-			err := l.stream.Send(resp)
+	// Downstream Recv is canceled by gRPC when this handler returns. Do not
+	// wait for it on a backend failure: the client may not send another request.
+	type received struct {
+		request *pb.LeaseKeepAliveRequest
+		err     error
+	}
+	requests := make(chan received)
+	go func() {
+		for {
+			req, err := p.stream.Recv()
+			select {
+			case requests <- received{req, err}:
+			case <-ctx.Done():
+				return
+			}
 			if err != nil {
+				return
+			}
+		}
+	}()
+	streams := make([]pb.Lease_LeaseKeepAliveClient, len(shards))
+	for {
+		var next received
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case next = <-requests:
+		}
+		if next.err == io.EOF {
+			return nil
+		}
+		if next.err != nil {
+			return next.err
+		}
+		// Send to every shard before receiving so renewals do not wait for replies.
+		for i, shard := range shards {
+			if streams[i] == nil {
+				backend, err := shard.LeaseKeepAlive(ctx)
+				if err != nil {
+					return err
+				}
+				streams[i] = backend
+			}
+			if err := streams[i].Send(next.request); err != nil {
+				// Send reports EOF when the server has terminated the stream;
+				// Recv carries the actual terminal gRPC status.
+				if err == io.EOF {
+					_, err = streams[i].Recv()
+					if err == nil || err == io.EOF {
+						err = status.Error(codes.Unavailable, "lease shard closed keepalive stream")
+					}
+				}
 				return err
 			}
 		}
-	}
-}
-
-func (l *SingleLeaseKeepAliveProxy) recvLoop() error {
-	for {
-		req, err := l.stream.Recv()
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			l.cancel()
-			return err
-		}
-		l.recvChan <- req
-	}
-}
-
-func (p *SingleLeaseKeepAliveProxy) handleRecvLoop() error {
-	for {
-		var req *pb.LeaseKeepAliveRequest
-		var err error
-		select {
-		case <-p.ctx.Done():
-			return p.ctx.Err()
-		case req = <-p.recvChan:
-		}
-
-		for _, shardCli := range p.configs.GetAllShardClis() {
-			shardStream, exist := p.mapShardStream[shardCli.GetShardID()]
-			if !exist {
-				shardStream, err = shardCli.LeaseKeepAlive(p.ctx)
-				if err != nil {
-					if err == io.EOF {
-						return nil
-					}
+		var response *pb.LeaseKeepAliveResponse
+		for _, backend := range streams {
+			resp, err := backend.Recv()
+			if err != nil {
+				if err == io.EOF {
+					return status.Error(codes.Unavailable, "lease shard closed keepalive stream")
 				}
-				p.mapShardStream[shardCli.GetShardID()] = shardStream
+				return err
 			}
-			shardStream.Send(req)
+			if resp.ID != next.request.ID {
+				return status.Error(codes.Internal, "unexpected lease keepalive response ID")
+			}
+			// A logical lease is alive only as long as its shortest-lived shard.
+			if response == nil || resp.TTL < response.TTL {
+				response = resp
+			}
+		}
+		if err := p.stream.Send(response); err != nil {
+			return err
 		}
 	}
 }
