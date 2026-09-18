@@ -1,0 +1,138 @@
+name: Kubernetes Integration
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.go'
+      - go.mod
+      - go.sum
+      - 'scripts/**'
+      - 'examples/**'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - '**.go'
+      - go.mod
+      - go.sum
+      - 'scripts/**'
+      - 'examples/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Integration suite to run
+        required: true
+        default: all
+        type: choice
+        options: [all, storage, kind]
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  storage:
+    name: Storage (Kubernetes ${{ matrix.kubernetes }})
+    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'all' || inputs.suite == 'storage'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        kubernetes: ['1.35.0', '1.37.0']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Download and verify official envtest binaries
+        env:
+          VERSION: ${{ matrix.kubernetes }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/envtest"
+          cd "$RUNNER_TEMP/envtest"
+          ASSET="envtest-v${VERSION}-linux-amd64.tar.gz"
+          URL="https://github.com/kubernetes-sigs/controller-tools/releases/download/envtest-v${VERSION}"
+          curl --fail --location --retry 3 -o "$ASSET" "$URL/$ASSET"
+          curl --fail --location --retry 3 -o "$ASSET.sha512" "$URL/$ASSET.sha512"
+          python3 - "$ASSET" <<'PY'
+          import hashlib, pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          expected = pathlib.Path(str(p) + '.sha512').read_text().split()[0]
+          assert hashlib.sha512(p.read_bytes()).hexdigest() == expected, 'SHA512 mismatch'
+          PY
+          tar -xzf "$ASSET"
+          echo "KUBEBUILDER_ASSETS=$RUNNER_TEMP/envtest/controller-tools/envtest" >> "$GITHUB_ENV"
+      - run: go test -tags=integration -race ./...
+      - name: Real Kubernetes resource sharding with mTLS
+        run: python3 scripts/k8s-smoke.py --workdir "$RUNNER_TEMP/k8s-smoke"
+      - name: Preserve logs and test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: storage-kubernetes-${{ matrix.kubernetes }}-logs
+          path: |
+            ${{ runner.temp }}/k8s-smoke/*.log
+            ${{ runner.temp }}/k8s-smoke/result.json
+          if-no-files-found: ignore
+  kind:
+    name: Common operations (Kubernetes ${{ matrix.kubernetes }})
+    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'all' || inputs.suite == 'kind'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kubernetes: '1.35.8'
+            node-image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          - kubernetes: '1.37.0'
+            node-image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install verified kind and matching kubectl
+        env:
+          KIND_VERSION: v0.33.0
+          KUBERNETES_VERSION: ${{ matrix.kubernetes }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/integration-bin"
+          cd "$RUNNER_TEMP/integration-bin"
+          URL="https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION"
+          curl --fail --location --retry 3 -o kind "$URL/kind-linux-amd64"
+          curl --fail --location --retry 3 -o kind.sha256 "$URL/kind-linux-amd64.sha256sum"
+          URL="https://dl.k8s.io/release/v${KUBERNETES_VERSION}/bin/linux/amd64"
+          curl --fail --location --retry 3 -o kubectl "$URL/kubectl"
+          curl --fail --location --retry 3 -o kubectl.sha256 "$URL/kubectl.sha256"
+          python3 - <<'PYVERIFY'
+          import hashlib, pathlib
+          for name in ('kind', 'kubectl'):
+              p = pathlib.Path(name)
+              expected = pathlib.Path(name + '.sha256').read_text().split()[0]
+              assert hashlib.sha256(p.read_bytes()).hexdigest() == expected, name + ' SHA256 mismatch'
+          PYVERIFY
+          chmod +x kind kubectl
+          echo "$RUNNER_TEMP/integration-bin" >> "$GITHUB_PATH"
+      - name: Run common operations on a real cluster with external etcd proxies
+        env:
+          NODE_IMAGE: ${{ matrix.node-image }}
+        run: >-
+          python3 scripts/kind-integration.py
+          --node-image "$NODE_IMAGE"
+          --workdir "$RUNNER_TEMP/kind-integration"
+          --cluster-name proxy-integration
+      - name: Preserve diagnostic logs and scenario results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kind-kubernetes-${{ matrix.kubernetes }}-results
+          path: ${{ runner.temp }}/kind-integration/artifacts/
+          if-no-files-found: ignore

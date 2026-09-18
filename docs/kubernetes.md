@@ -58,6 +58,8 @@ This does not introduce distributed transactions or global revisions across endp
 
 ## Repeatable verification
 
+The dedicated [Kubernetes Integration workflow](integration-tests.md) runs both these storage checks and common operations on a full kind cluster. It supports manual dispatch and uploads scenario results and diagnostic logs.
+
 Unit and in-memory gRPC tests:
 
 ```bash
