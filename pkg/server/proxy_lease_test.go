@@ -201,7 +201,7 @@ func TestLeaseKeepAliveRPC(t *testing.T) {
 			}
 		}
 	})
-	for _, stage := range []string{"open", "send", "receive", "backend EOF", "mismatch", "empty", "expired"} {
+	for _, stage := range []string{"open", "send", "receive", "backend EOF", "send EOF", "send EOF status", "mismatch", "empty", "expired"} {
 		t.Run(stage, func(t *testing.T) {
 			want := status.Error(codes.Unavailable, "backend failed")
 			backend := &leaseTestStream{ttl: 60}
@@ -210,6 +210,14 @@ func TestLeaseKeepAliveRPC(t *testing.T) {
 			}
 			if stage == "receive" {
 				backend.recvErr = want
+			}
+			if stage == "send EOF" {
+				backend.sendErr = io.EOF
+				backend.recvErr = io.EOF
+			}
+			if stage == "send EOF status" {
+				backend.sendErr = io.EOF
+				backend.recvErr = status.Error(codes.PermissionDenied, "denied")
 			}
 			if stage == "backend EOF" {
 				backend.recvErr = io.EOF
@@ -242,6 +250,8 @@ func TestLeaseKeepAliveRPC(t *testing.T) {
 			case "expired":
 				require.NoError(t, err)
 				require.Zero(t, resp.TTL)
+			case "send EOF status":
+				require.Equal(t, codes.PermissionDenied, status.Code(err))
 			case "mismatch":
 				require.Equal(t, codes.Internal, status.Code(err))
 			default:

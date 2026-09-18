@@ -140,6 +140,14 @@ func (p *SingleLeaseKeepAliveProxy) Run() error {
 				streams[i] = backend
 			}
 			if err := streams[i].Send(next.request); err != nil {
+				// Send reports EOF when the server has terminated the stream;
+				// Recv carries the actual terminal gRPC status.
+				if err == io.EOF {
+					_, err = streams[i].Recv()
+					if err == nil || err == io.EOF {
+						err = status.Error(codes.Unavailable, "lease shard closed keepalive stream")
+					}
+				}
 				return err
 			}
 		}
