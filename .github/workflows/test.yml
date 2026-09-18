@@ -1,0 +1,62 @@
+name: Test
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - run: go test -race ./...
+      - run: go vet ./...
+  kubernetes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        kubernetes: ['1.35.0', '1.37.0']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Download and verify official envtest binaries
+        env:
+          VERSION: ${{ matrix.kubernetes }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/envtest"
+          cd "$RUNNER_TEMP/envtest"
+          ASSET="envtest-v${VERSION}-linux-amd64.tar.gz"
+          URL="https://github.com/kubernetes-sigs/controller-tools/releases/download/envtest-v${VERSION}"
+          curl --fail --location --retry 3 -o "$ASSET" "$URL/$ASSET"
+          curl --fail --location --retry 3 -o "$ASSET.sha512" "$URL/$ASSET.sha512"
+          python3 - "$ASSET" <<'PY'
+          import hashlib, pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          expected = pathlib.Path(str(p) + '.sha512').read_text().split()[0]
+          assert hashlib.sha512(p.read_bytes()).hexdigest() == expected, 'SHA512 mismatch'
+          PY
+          tar -xzf "$ASSET"
+          echo "KUBEBUILDER_ASSETS=$RUNNER_TEMP/envtest/controller-tools/envtest" >> "$GITHUB_ENV"
+      - run: go test -tags=integration -race ./...
+      - name: Real Kubernetes resource sharding with mTLS
+        run: python3 scripts/k8s-smoke.py --workdir "$RUNNER_TEMP/k8s-smoke"
+      - name: Preserve logs and test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kubernetes-${{ matrix.kubernetes }}-logs
+          path: |
+            ${{ runner.temp }}/k8s-smoke/*.log
+            ${{ runner.temp }}/k8s-smoke/result.json
+          if-no-files-found: ignore

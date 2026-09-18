@@ -27,17 +27,23 @@
 
 The `Etcd Sharding Proxy` Serves to clients as an etcd endpoint. It proxies requests to the correct `shard` etcd cluster based on the key.
 
+# Kubernetes
+
+For Kubernetes, use the `backend` mode with one endpoint per logical etcd cluster and kube-apiserver resource overrides for sharding. This preserves revisions, transactions, Watch, Lease, Compact and Status semantics and supports TLS/mTLS on both connections. See [Kubernetes setup and verification](docs/kubernetes.md).
+
+The original `shards` key-range mode below is experimental and not Kubernetes compatible. It does not provide global revisions or atomic cross-shard transactions.
+
 # Road Map
 - [✅] Support KV APIs
 - [✅] Support Watch APIs
 - [testing] Support Lease APIs
 - Support Auth APIs
-- Support Maintenance APIs
-- Support TLS
+- [backend mode] Support Maintenance APIs
+- [backend mode] Support TLS/mTLS
 - Basic Metrics
 - Performance Test & Tuning for large scale cluster
 
-# Compatibility
+# Legacy key-range mode compatibility
 `Revision`, `MemberId`, `ClusterId` of each shard is used. Hence:
 - Field `revision` in `Range` / `RangeDelete` requests across different shards will not work.
 - `Txn` cannot be executed across multiple shards. NOTE: The proxy will not do check for this. If you use `Txn` across multiple shards, the result is undefined.
